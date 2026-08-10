@@ -39,7 +39,7 @@ QUOTE_RE = re.compile(
 )
 
 HistoryKey = tuple[str | None, str | None, str | None, str | None]
-HistoryEntry = tuple[datetime, "SwapRun"]
+HistoryEntry = tuple[datetime, "QuotesRun"]
 
 
 class RunHistoryStore:
@@ -50,12 +50,12 @@ class RunHistoryStore:
         self._history: dict[HistoryKey, list[HistoryEntry]] = {}
 
     @staticmethod
-    def _identity_key(run: "SwapRun") -> HistoryKey:
+    def _identity_key(run: "QuotesRun") -> HistoryKey:
         return (run.provider, run.underlying, run.currency, run.instrument)
 
     @staticmethod
     def _matches_filters(
-        run: "SwapRun",
+        run: "QuotesRun",
         provider: str | None = None,
         underlying: str | None = None,
         currency: str | None = None,
@@ -68,7 +68,7 @@ class RunHistoryStore:
             and (instrument is None or run.instrument == instrument)
         )
 
-    def add(self, run: "SwapRun", timestamp: datetime | None = None) -> datetime:
+    def add(self, run: "QuotesRun", timestamp: datetime | None = None) -> datetime:
         """Append a run to the store and index it by its composite identity."""
         stamp = timestamp or datetime.now()
         entry: HistoryEntry = (stamp, run)
@@ -84,7 +84,7 @@ class RunHistoryStore:
         currency: str | None = None,
         instrument: str | None = None,
         as_of: datetime | None = None,
-    ) -> list["SwapRun"]:
+    ) -> list["QuotesRun"]:
         """Return the chronological history for a run identity, optionally up to a point in time."""
         if provider is None and underlying is None and currency is None and instrument is None:
             entries = self._entries
@@ -103,9 +103,9 @@ class RunHistoryStore:
 
         return [run for _, run in entries]
 
-    def get_actual_runs(self, as_of: datetime | None = None) -> list["SwapRun"]:
+    def get_actual_runs(self, as_of: datetime | None = None) -> list["QuotesRun"]:
         """Return the latest run for each identity that is active as of the supplied time."""
-        candidates: dict[HistoryKey, tuple[datetime, "SwapRun"]] = {}
+        candidates: dict[HistoryKey, tuple[datetime, "QuotesRun"]] = {}
         for stamp, run in self._entries:
             if as_of is not None and stamp > as_of:
                 continue
@@ -125,7 +125,7 @@ class RunHistoryStore:
 RUN_HISTORY = RunHistoryStore()
 
 
-class SwapRun:
+class QuotesRun:
     """Parsed representation of an interest-rate swap run.
 
     Attributes:
@@ -459,15 +459,18 @@ def _is_run_header_line(line: str) -> bool:
     if len(parts) < 2:
         return False
 
-    return parts[0] in CURRENCY_CODES
+    # Headers may lead with a currency (``RUB KRS run``) or, for cross-currency
+    # instruments, with the instrument family instead (``XCCY CNH/RUONIA run``).
+    leading_token = parts[0].upper()
+    return leading_token in CURRENCY_CODES or leading_token in INSTRUMENT_TYPES
 
 
-def _run_identity(run: "SwapRun") -> HistoryKey:
+def _run_identity(run: "QuotesRun") -> HistoryKey:
     """Return the canonical key used to group identical run histories."""
     return (run.provider, run.underlying, run.currency, run.instrument)
 
 
-def _register_run(run: "SwapRun") -> None:
+def _register_run(run: "QuotesRun") -> None:
     """Store a parsed run globally and attach it to its identity-based history."""
     RUN_HISTORY.add(run)
 
@@ -478,7 +481,7 @@ def get_run_history(
     currency: str | None = None,
     instrument: str | None = None,
     as_of: datetime | None = None,
-) -> list[SwapRun]:
+) -> list[QuotesRun]:
     """Return the chronological history for a run identity.
 
     If no filters are supplied, the full run storage is returned in append order.
@@ -497,7 +500,7 @@ def clear_run_storage() -> None:
     RUN_HISTORY.clear()
 
 
-def parse_multiple_runs(run_text: str, provider: str | None = None) -> list[SwapRun]:
+def parse_multiple_runs(run_text: str, provider: str | None = None) -> list[QuotesRun]:
     """Parse a text blob containing multiple swap runs from a single provider.
 
     The function locates each header line, slices the text between headers,
@@ -511,7 +514,7 @@ def parse_multiple_runs(run_text: str, provider: str | None = None) -> list[Swap
     if not header_indexes:
         raise ValueError("Could not locate any swap run headers in the supplied text.")
 
-    runs: list[SwapRun] = []
+    runs: list[QuotesRun] = []
     for index, start_index in enumerate(header_indexes):
         end_index = header_indexes[index + 1] if index + 1 < len(header_indexes) else len(lines)
         run_block = "\n".join(lines[start_index:end_index])
@@ -520,7 +523,7 @@ def parse_multiple_runs(run_text: str, provider: str | None = None) -> list[Swap
     return runs
 
 
-def parse_swap_run(run_text: str, provider: str | None = None) -> SwapRun:
+def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
     """Parse a single swap-run text block into a structured :class:`SwapRun`.
 
     Args:
@@ -555,7 +558,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> SwapRun:
     header_tokens = _tokenize_header(full_header)
     parsed_currency, instrument_type, underlying_indicator, recognized_tokens, unrecognized_tokens = _infer_header_metadata(header_tokens)
 
-    swap_run = SwapRun(
+    swap_run = QuotesRun(
         currency=(parsed_currency or currency).upper(),
         run_name=run_name,
         instrument=instrument_type,
