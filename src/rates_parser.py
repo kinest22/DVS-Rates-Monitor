@@ -13,7 +13,7 @@ representation suitable for notebook or console inspection.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 import re
 
@@ -88,6 +88,9 @@ class RunHistoryStore:
         """Return the chronological history for a run identity, optionally up to a point in time."""
         if provider is None and underlying is None and currency is None and instrument is None:
             entries = self._entries
+        elif None not in (provider, underlying, currency, instrument):
+            # All four identity fields are pinned, so the index gives an O(1) lookup.
+            entries = self._history.get((provider, underlying, currency, instrument), [])
         else:
             entries = [
                 entry
@@ -344,7 +347,10 @@ def _tokenize_header(header_text: str) -> list[str]:
 
 def _is_indicator_token(token: str) -> bool:
     """Return True when the token represents a valid underlying indicator."""
-    return token in INDICATOR_CODES or "/" in token and all(part in {"RUONIA", "SOFR", "RUSFAR", "RUSFARON", "KEYRATE", "CNH", "CNY", "RUB", "USD", "EUR"} for part in token.split("/"))
+    if token in INDICATOR_CODES:
+        return True
+    valid_parts = INDICATOR_CODES | CURRENCY_CODES
+    return "/" in token and all(part in valid_parts for part in token.split("/"))
 
 
 def _is_currency_token(token: str) -> bool:
@@ -428,7 +434,7 @@ def _infer_header_metadata(header_tokens: list[str]) -> tuple[str | None, str | 
 
         if instrument_type == "XCCY" and underlying_indicator is not None and "/" in underlying_indicator:
             lhs, rhs = underlying_indicator.split("/", 1)
-            if lhs in {"CNH", "CNY", "RUB", "USD", "EUR"} and rhs in {"RUONIA", "SOFR", "RUSFAR", "RUSFARON", "KEYRATE"}:
+            if lhs in CURRENCY_CODES and rhs in INDICATOR_CODES:
                 underlying_indicator = _normalize_pair(rhs, lhs)
 
         if instrument_type == "KRS" and underlying_indicator is None:
