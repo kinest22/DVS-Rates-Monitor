@@ -178,6 +178,11 @@ class QuotesRun:
         provider-aware ranking layout where the bid/offer descriptors are kept
         explicit. For a single-provider run, the best and bad levels propagate the
         same numeric values and provider label, matching the expected display.
+
+        A quote payload may optionally carry ``bad_bid``, ``bad_offer`` and their
+        matching ``*_provider`` keys (used for joint runs built across several
+        providers, see :func:`create_joint_runs`); when absent, the bad levels and
+        their providers default to the best bid/offer and this run's provider.
         """
         rows = []
         has_end_dates = any(
@@ -188,25 +193,29 @@ class QuotesRun:
         is_fx_swap = self.instrument == "FXSWAP"
 
         for tenor, quote in self.quotes.items():
-            bid = float(quote["bid"])
-            offer = float(quote["offer"])
-            mid = (bid + offer) / 2.0
-            spread = offer - bid
+            best_bid = float(quote["bid"])
+            best_offer = float(quote["offer"])
+            bad_bid = float(quote.get("bad_bid", best_bid))
+            bad_offer = float(quote.get("bad_offer", best_offer))
+            mid = (best_bid + best_offer) / 2.0
+            spread = best_offer - best_bid
             spread_bp = spread * 100.0 if not is_fx_swap else spread
+            bad_spread = bad_offer - bad_bid
+            bad_spread_bp = bad_spread * 100.0 if not is_fx_swap else bad_spread
 
             row = {
                 "tenor": tenor,
-                "bad_bid_provider": provider,
-                "bad_bid": bid,
-                "best_bid_provider": provider,
-                "best_bid": bid,
+                "bad_bid_provider": quote.get("bad_bid_provider", provider),
+                "bad_bid": bad_bid,
+                "best_bid_provider": quote.get("best_bid_provider", provider),
+                "best_bid": best_bid,
                 "mid": mid,
-                "best_offer": offer,
-                "best_offer_provider": provider,
-                "bad_offer": offer,
-                "bad_offer_provider": provider,
+                "best_offer": best_offer,
+                "best_offer_provider": quote.get("best_offer_provider", provider),
+                "bad_offer": bad_offer,
+                "bad_offer_provider": quote.get("bad_offer_provider", provider),
                 "best_bid_offer_spread": spread_bp,
-                "bad_bid_offer_spread": spread_bp,
+                "bad_bid_offer_spread": bad_spread_bp,
             }
             if has_end_dates:
                 row["end_date"] = quote.get("end_date")
@@ -465,11 +474,6 @@ def _is_run_header_line(line: str) -> bool:
     return leading_token in CURRENCY_CODES or leading_token in INSTRUMENT_TYPES
 
 
-def _run_identity(run: "QuotesRun") -> HistoryKey:
-    """Return the canonical key used to group identical run histories."""
-    return (run.provider, run.underlying, run.currency, run.instrument)
-
-
 def _register_run(run: "QuotesRun") -> None:
     """Store a parsed run globally and attach it to its identity-based history."""
     RUN_HISTORY.add(run)
@@ -493,6 +497,75 @@ def get_run_history(
         instrument=instrument,
         as_of=as_of,
     )
+
+
+def get_actual_runs(as_of: datetime | None = None) -> list[QuotesRun]:
+    """Return the latest run for each identity that is active as of the supplied time."""
+    return RUN_HISTORY.get_actual_runs(as_of=as_of)
+
+
+def create_joint_runs(as_of: datetime | None = None) -> list[QuotesRun]:
+    """Group the actual runs by instrument, currency, and underlying and join them.
+
+    Each provider's latest active run (see :meth:`RunHistoryStore.get_actual_runs`)
+    is bucketed by its ``(instrument, currency, underlying)`` identity, ignoring
+    ``provider``. Each bucket becomes a single :class:`QuotesRun` combining every
+    provider quoting that identity: for each tenor, the best bid is the highest
+    bid across the joined providers and the worst ("bad") bid is the lowest; the
+    best offer is the lowest offer and the worst offer is the highest. Provider
+    labels are rewritten to whoever actually quoted the selected level, and
+    ``mid``/spreads are recalculated from the best bid and best offer by
+    :meth:`QuotesRun.to_frame`. Each resulting joint run is registered in
+    :data:`RUN_HISTORY` under the ``"joint"`` provider, same as a parsed run.
+    """
+    groups: dict[tuple[str | None, str | None, str | None], list[QuotesRun]] = {}
+    for run in RUN_HISTORY.get_actual_runs(as_of=as_of):
+        key = (run.instrument, run.currency, run.underlying)
+        groups.setdefault(key, []).append(run)
+
+    joint_runs = []
+    for (instrument, currency, underlying), runs in groups.items():
+        #providers = sorted({run.provider for run in runs if run.provider is not None})
+        joint_run = QuotesRun(
+            currency=currency,
+            run_name=runs[0].run_name,
+            instrument=instrument,
+            underlying=underlying,
+            provider="joint",
+        )
+
+        tenor_entries: dict[str, list[tuple[str | None, float, float, str | None]]] = {}
+        for run in runs:
+            for tenor, quote in run.quotes.items():
+                tenor_entries.setdefault(tenor, []).append(
+                    (run.provider, float(quote["bid"]), float(quote["offer"]), quote.get("end_date"))
+                )
+
+        for tenor, entries in tenor_entries.items():
+            best_bid_provider, best_bid, _, _ = max(entries, key=lambda entry: entry[1])
+            bad_bid_provider, bad_bid, _, _ = min(entries, key=lambda entry: entry[1])
+            best_offer_provider, _, best_offer, _ = min(entries, key=lambda entry: entry[2])
+            bad_offer_provider, _, bad_offer, _ = max(entries, key=lambda entry: entry[2])
+            end_dates = [entry[3] for entry in entries if entry[3] is not None]
+
+            quote_payload = {
+                "bid": best_bid,
+                "offer": best_offer,
+                "best_bid_provider": best_bid_provider,
+                "bad_bid": bad_bid,
+                "bad_bid_provider": bad_bid_provider,
+                "best_offer_provider": best_offer_provider,
+                "bad_offer": bad_offer,
+                "bad_offer_provider": bad_offer_provider,
+            }
+            if end_dates:
+                quote_payload["end_date"] = end_dates[0]
+            joint_run.quotes[tenor] = quote_payload
+
+        _register_run(joint_run)
+        joint_runs.append(joint_run)
+
+    return joint_runs
 
 
 def clear_run_storage() -> None:
