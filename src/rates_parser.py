@@ -14,10 +14,71 @@ representation suitable for notebook or console inspection.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+import json
+import os
 import re
+import sqlite3
 
 import pandas as pd
+
+
+DEFAULT_DB_PATH = os.environ.get(
+    "RATES_MONITOR_DB_PATH",
+    str(Path(__file__).resolve().parent.parent / "data" / "runhist.db"),
+)
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT,
+    currency TEXT,
+    instrument TEXT,
+    underlying TEXT,
+    run_name TEXT,
+    header_tokens TEXT,
+    unrecognized_tokens TEXT,
+    size TEXT,
+    size_type TEXT,
+    size_currency TEXT,
+    size_value REAL,
+    size_unit TEXT,
+    start_fx_rate REAL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_identity
+    ON runs (provider, underlying, currency, instrument, created_at);
+
+CREATE TABLE IF NOT EXISTS quotes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    tenor TEXT NOT NULL,
+    worst_bid_provider TEXT,
+    worst_bid REAL,
+    best_bid_provider TEXT,
+    best_bid REAL NOT NULL,
+    mid REAL NOT NULL,
+    best_offer REAL NOT NULL,
+    best_offer_provider TEXT,
+    worst_offer REAL,
+    worst_offer_provider TEXT,
+    end_date TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_run_id ON quotes (run_id);
+"""
+
+QUOTE_OPTIONAL_COLUMNS = (
+    "end_date",
+    "worst_bid",
+    "worst_bid_provider",
+    "best_bid_provider",
+    "best_offer_provider",
+    "worst_offer",
+    "worst_offer_provider",
+)
 
 
 CURRENCY_CODES = frozenset({"RUB", "USD", "CNY", "CNH", "EUR"})
@@ -39,43 +100,106 @@ QUOTE_RE = re.compile(
 )
 
 HistoryKey = tuple[str | None, str | None, str | None, str | None]
-HistoryEntry = tuple[datetime, "QuotesRun"]
 
 
 class RunHistoryStore:
-    """Store parsed runs chronologically and expose latest active runs by identity."""
+    """Persist parsed runs in SQLite and expose latest active runs by identity."""
 
-    def __init__(self) -> None:
-        self._entries: list[HistoryEntry] = []
-        self._history: dict[HistoryKey, list[HistoryEntry]] = {}
-
-    @staticmethod
-    def _identity_key(run: "QuotesRun") -> HistoryKey:
-        return (run.provider, run.underlying, run.currency, run.instrument)
-
-    @staticmethod
-    def _matches_filters(
-        run: "QuotesRun",
-        provider: str | None = None,
-        underlying: str | None = None,
-        currency: str | None = None,
-        instrument: str | None = None,
-    ) -> bool:
-        return (
-            (provider is None or run.provider == provider)
-            and (underlying is None or run.underlying == underlying)
-            and (currency is None or run.currency == currency)
-            and (instrument is None or run.instrument == instrument)
-        )
+    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
+        self.db_path = str(db_path)
+        if self.db_path != ":memory:":
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self.db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.executescript(SCHEMA_SQL)
+        self._conn.commit()
 
     def add(self, run: "QuotesRun", timestamp: datetime | None = None) -> datetime:
-        """Append a run to the store and index it by its composite identity."""
+        """Persist a run and its quotes, returning the timestamp it was stored under."""
         stamp = timestamp or datetime.now()
-        entry: HistoryEntry = (stamp, run)
-        self._entries.append(entry)
-        key = self._identity_key(run)
-        self._history.setdefault(key, []).append(entry)
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO runs (
+                    provider, currency, instrument, underlying, run_name,
+                    header_tokens, unrecognized_tokens, size, size_type,
+                    size_currency, size_value, size_unit, start_fx_rate, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.provider,
+                    run.currency,
+                    run.instrument,
+                    run.underlying,
+                    run.run_name,
+                    json.dumps(run.header_tokens),
+                    json.dumps(run.unrecognized_tokens),
+                    run.size,
+                    run.size_type,
+                    run.size_currency,
+                    run.size_value,
+                    run.size_unit,
+                    run.start_fx_rate,
+                    stamp.isoformat(sep=" "),
+                ),
+            )
+            run_id = cursor.lastrowid
+            self._conn.executemany(
+                """
+                INSERT INTO quotes (
+                    run_id, tenor, worst_bid_provider, worst_bid, best_bid_provider, best_bid,
+                    mid, best_offer, best_offer_provider, worst_offer, worst_offer_provider, end_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        tenor,
+                        quote.get("worst_bid_provider", run.provider),
+                        quote.get("worst_bid"),
+                        quote.get("best_bid_provider", run.provider),
+                        quote["best_bid"],
+                        (float(quote["best_bid"]) + float(quote["best_offer"])) / 2.0,
+                        quote["best_offer"],
+                        quote.get("best_offer_provider", run.provider),
+                        quote.get("worst_offer"),
+                        quote.get("worst_offer_provider", run.provider),
+                        quote.get("end_date"),
+                    )
+                    for tenor, quote in run.quotes.items()
+                ],
+            )
         return stamp
+
+    def _row_to_run(self, row: sqlite3.Row) -> "QuotesRun":
+        """Reconstruct a :class:`QuotesRun` from a ``runs`` row and its ``quotes`` rows."""
+        run = QuotesRun(
+            currency=row["currency"],
+            run_name=row["run_name"],
+            instrument=row["instrument"],
+            underlying=row["underlying"],
+            provider=row["provider"],
+            header_tokens=json.loads(row["header_tokens"]) if row["header_tokens"] else [],
+            unrecognized_tokens=json.loads(row["unrecognized_tokens"]) if row["unrecognized_tokens"] else [],
+            size=row["size"],
+            size_type=row["size_type"],
+            size_currency=row["size_currency"],
+            size_value=row["size_value"],
+            size_unit=row["size_unit"],
+            start_fx_rate=row["start_fx_rate"],
+        )
+        quote_rows = self._conn.execute(
+            "SELECT * FROM quotes WHERE run_id = ? ORDER BY id", (row["id"],)
+        ).fetchall()
+        for quote_row in quote_rows:
+            payload: dict[str, Any] = {"best_bid": quote_row["best_bid"], "best_offer": quote_row["best_offer"]}
+            for column in QUOTE_OPTIONAL_COLUMNS:
+                value = quote_row[column]
+                if value is not None:
+                    payload[column] = value
+            run.quotes[quote_row["tenor"]] = payload
+        return run
 
     def get_history(
         self,
@@ -86,40 +210,58 @@ class RunHistoryStore:
         as_of: datetime | None = None,
     ) -> list["QuotesRun"]:
         """Return the chronological history for a run identity, optionally up to a point in time."""
-        if provider is None and underlying is None and currency is None and instrument is None:
-            entries = self._entries
-        elif None not in (provider, underlying, currency, instrument):
-            # All four identity fields are pinned, so the index gives an O(1) lookup.
-            entries = self._history.get((provider, underlying, currency, instrument), [])
-        else:
-            entries = [
-                entry
-                for entry in self._entries
-                if self._matches_filters(entry[1], provider, underlying, currency, instrument)
-            ]
-
+        clauses = []
+        params: list[Any] = []
+        for column, value in (
+            ("provider", provider),
+            ("underlying", underlying),
+            ("currency", currency),
+            ("instrument", instrument),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
         if as_of is not None:
-            entries = [entry for entry in entries if entry[0] <= as_of]
+            clauses.append("created_at <= ?")
+            params.append(as_of.isoformat(sep=" "))
 
-        return [run for _, run in entries]
+        query = "SELECT * FROM runs"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at, id"
+
+        rows = self._conn.execute(query, params).fetchall()
+        return [self._row_to_run(row) for row in rows]
 
     def get_actual_runs(self, as_of: datetime | None = None) -> list["QuotesRun"]:
         """Return the latest run for each identity that is active as of the supplied time."""
-        candidates: dict[HistoryKey, tuple[datetime, "QuotesRun"]] = {}
-        for stamp, run in self._entries:
-            if as_of is not None and stamp > as_of:
-                continue
-            key = self._identity_key(run)
-            current = candidates.get(key)
-            if current is None or stamp > current[0]:
-                candidates[key] = (stamp, run)
+        query = "SELECT * FROM runs"
+        params: list[Any] = []
+        if as_of is not None:
+            query += " WHERE created_at <= ?"
+            params.append(as_of.isoformat(sep=" "))
+        query += " ORDER BY created_at, id"
 
-        return [run for _, run in sorted(candidates.values(), key=lambda item: item[0])]
+        rows = self._conn.execute(query, params).fetchall()
+        candidates: dict[HistoryKey, sqlite3.Row] = {}
+        for row in rows:
+            key = (row["provider"], row["underlying"], row["currency"], row["instrument"])
+            current = candidates.get(key)
+            if current is None or row["created_at"] > current["created_at"]:
+                candidates[key] = row
+
+        ordered_rows = sorted(candidates.values(), key=lambda row: (row["created_at"], row["id"]))
+        return [self._row_to_run(row) for row in ordered_rows]
 
     def clear(self) -> None:
-        """Reset the store and all indexed history."""
-        self._entries.clear()
-        self._history.clear()
+        """Delete all stored runs and quotes from the database."""
+        with self._conn:
+            self._conn.execute("DELETE FROM quotes")
+            self._conn.execute("DELETE FROM runs")
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        self._conn.close()
 
 
 RUN_HISTORY = RunHistoryStore()
@@ -133,7 +275,7 @@ class QuotesRun:
         run_name: full header text without ``Bid``/``Offer`` words.
         instrument: swap family, e.g. ``OIS``, ``KRS``, ``XCCY`` or ``CCIRS``.
         underlying: swap reference curve(s), e.g. ``RUONIA`` or ``RUONIA/SOFR``.
-        quotes: mapping from tenor such as ``3M`` to ``{"bid": ..., "offer": ...}``.
+        quotes: mapping from tenor such as ``3M`` to ``{"best_bid": ..., "best_offer": ...}``.
         size: quantity printed in the run footer, e.g. ``1k``.
         size_type: the sizing descriptor printed next to the quantity, e.g. ``DV``.
         size_currency: the currency descriptor printed next to the quantity, e.g. ``USD``.
@@ -179,9 +321,9 @@ class QuotesRun:
         explicit. For a single-provider run, the best and bad levels propagate the
         same numeric values and provider label, matching the expected display.
 
-        A quote payload may optionally carry ``bad_bid``, ``bad_offer`` and their
+        A quote payload may optionally carry ``worst_bid``, ``worst_offer`` and their
         matching ``*_provider`` keys (used for joint runs built across several
-        providers, see :func:`create_joint_runs`); when absent, the bad levels and
+        providers, see :func:`create_joint_runs`); when absent, the worst levels and
         their providers default to the best bid/offer and this run's provider.
         """
         rows = []
@@ -193,29 +335,29 @@ class QuotesRun:
         is_fx_swap = self.instrument == "FXSWAP"
 
         for tenor, quote in self.quotes.items():
-            best_bid = float(quote["bid"])
-            best_offer = float(quote["offer"])
-            bad_bid = float(quote.get("bad_bid", best_bid))
-            bad_offer = float(quote.get("bad_offer", best_offer))
+            best_bid = float(quote["best_bid"])
+            best_offer = float(quote["best_offer"])
+            worst_bid = float(quote.get("worst_bid", best_bid))
+            worst_offer = float(quote.get("worst_offer", best_offer))
             mid = (best_bid + best_offer) / 2.0
             spread = best_offer - best_bid
             spread_bp = spread * 100.0 if not is_fx_swap else spread
-            bad_spread = bad_offer - bad_bid
-            bad_spread_bp = bad_spread * 100.0 if not is_fx_swap else bad_spread
+            worst_spread = worst_offer - worst_bid
+            worst_spread_bp = worst_spread * 100.0 if not is_fx_swap else worst_spread
 
             row = {
                 "tenor": tenor,
-                "bad_bid_provider": quote.get("bad_bid_provider", provider),
-                "bad_bid": bad_bid,
+                "worst_bid_provider": quote.get("worst_bid_provider", provider),
+                "worst_bid": worst_bid,
                 "best_bid_provider": quote.get("best_bid_provider", provider),
                 "best_bid": best_bid,
                 "mid": mid,
                 "best_offer": best_offer,
                 "best_offer_provider": quote.get("best_offer_provider", provider),
-                "bad_offer": bad_offer,
-                "bad_offer_provider": quote.get("bad_offer_provider", provider),
+                "worst_offer": worst_offer,
+                "worst_offer_provider": quote.get("worst_offer_provider", provider),
                 "best_bid_offer_spread": spread_bp,
-                "bad_bid_offer_spread": bad_spread_bp,
+                "worst_bid_offer_spread": worst_spread_bp,
             }
             if has_end_dates:
                 row["end_date"] = quote.get("end_date")
@@ -511,7 +653,7 @@ def create_joint_runs(as_of: datetime | None = None) -> list[QuotesRun]:
     is bucketed by its ``(instrument, currency, underlying)`` identity, ignoring
     ``provider``. Each bucket becomes a single :class:`QuotesRun` combining every
     provider quoting that identity: for each tenor, the best bid is the highest
-    bid across the joined providers and the worst ("bad") bid is the lowest; the
+    bid across the joined providers and the worst bid is the lowest; the
     best offer is the lowest offer and the worst offer is the highest. Provider
     labels are rewritten to whoever actually quoted the selected level, and
     ``mid``/spreads are recalculated from the best bid and best offer by
@@ -538,25 +680,25 @@ def create_joint_runs(as_of: datetime | None = None) -> list[QuotesRun]:
         for run in runs:
             for tenor, quote in run.quotes.items():
                 tenor_entries.setdefault(tenor, []).append(
-                    (run.provider, float(quote["bid"]), float(quote["offer"]), quote.get("end_date"))
+                    (run.provider, float(quote["best_bid"]), float(quote["best_offer"]), quote.get("end_date"))
                 )
 
         for tenor, entries in tenor_entries.items():
             best_bid_provider, best_bid, _, _ = max(entries, key=lambda entry: entry[1])
-            bad_bid_provider, bad_bid, _, _ = min(entries, key=lambda entry: entry[1])
+            worst_bid_provider, worst_bid, _, _ = min(entries, key=lambda entry: entry[1])
             best_offer_provider, _, best_offer, _ = min(entries, key=lambda entry: entry[2])
-            bad_offer_provider, _, bad_offer, _ = max(entries, key=lambda entry: entry[2])
+            worst_offer_provider, _, worst_offer, _ = max(entries, key=lambda entry: entry[2])
             end_dates = [entry[3] for entry in entries if entry[3] is not None]
 
             quote_payload = {
-                "bid": best_bid,
-                "offer": best_offer,
+                "best_bid": best_bid,
+                "best_offer": best_offer,
                 "best_bid_provider": best_bid_provider,
-                "bad_bid": bad_bid,
-                "bad_bid_provider": bad_bid_provider,
+                "worst_bid": worst_bid,
+                "worst_bid_provider": worst_bid_provider,
                 "best_offer_provider": best_offer_provider,
-                "bad_offer": bad_offer,
-                "bad_offer_provider": bad_offer_provider,
+                "worst_offer": worst_offer,
+                "worst_offer_provider": worst_offer_provider,
             }
             if end_dates:
                 quote_payload["end_date"] = end_dates[0]
@@ -569,7 +711,7 @@ def create_joint_runs(as_of: datetime | None = None) -> list[QuotesRun]:
 
 
 def clear_run_storage() -> None:
-    """Delete the in-memory storage and history index for the current session."""
+    """Delete all stored runs and quotes from the SQLite-backed history."""
     RUN_HISTORY.clear()
 
 
@@ -678,7 +820,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
         tenor = quote_match.group("tenor")
         bid = _normalize_decimal(quote_match.group("bid"))
         offer = _normalize_decimal(quote_match.group("offer"))
-        quote_payload = {"bid": bid, "offer": offer}
+        quote_payload = {"best_bid": bid, "best_offer": offer}
         end_date = quote_match.group("end_date")
         if end_date is not None:
             quote_payload["end_date"] = end_date

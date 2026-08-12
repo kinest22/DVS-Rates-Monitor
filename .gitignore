@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Rates monitor SQLite history database
+/data/*.db
+/data/*.db-journal
