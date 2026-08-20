@@ -220,3 +220,5 @@ __marimo__/
 # Rates monitor SQLite history database
 /data/*.db
 /data/*.db-journal
+/data/*.db-shm
+/data/*.db-wal
