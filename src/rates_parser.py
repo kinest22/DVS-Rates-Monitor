@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 
 import pandas as pd
 
@@ -109,11 +110,38 @@ class RunHistoryStore:
         self.db_path = str(db_path)
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.executescript(SCHEMA_SQL)
-        self._conn.commit()
+        self._local = threading.local()
+        self._all_conns: list[sqlite3.Connection] = []
+        self._conns_lock = threading.Lock()
+        with self._conn:
+            self._conn.executescript(SCHEMA_SQL)
+
+    def _new_connection(self) -> sqlite3.Connection:
+        """Open a fresh connection for the calling thread.
+
+        Streamlit reruns each session's script in its own worker thread, and
+        sqlite3 connections are bound to the thread that created them, so a
+        single shared connection silently breaks across reruns. Each thread
+        gets its own connection to the same on-disk database instead; WAL
+        mode lets those connections read/write concurrently without locking
+        each other out.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        if self.db_path != ":memory:":
+            conn.execute("PRAGMA journal_mode = WAL")
+        with self._conns_lock:
+            self._all_conns.append(conn)
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._new_connection()
+            self._local.conn = conn
+        return conn
 
     def add(self, run: "QuotesRun", timestamp: datetime | None = None) -> datetime:
         """Persist a run and its quotes, returning the timestamp it was stored under."""
@@ -260,8 +288,12 @@ class RunHistoryStore:
             self._conn.execute("DELETE FROM runs")
 
     def close(self) -> None:
-        """Close the underlying SQLite connection."""
-        self._conn.close()
+        """Close every per-thread SQLite connection opened so far."""
+        with self._conns_lock:
+            conns, self._all_conns = self._all_conns, []
+        for conn in conns:
+            conn.close()
+        self._local.conn = None
 
 
 RUN_HISTORY = RunHistoryStore()
