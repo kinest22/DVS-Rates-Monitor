@@ -1,15 +1,13 @@
 import pandas as pd
 import streamlit as st
-from rates_parser import RUN_HISTORY
+from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs
 from datetime import datetime
 
-# =====================================================================================
-# setting page
-# =====================================================================================
-st.set_page_config(
-    page_title="Rates Monitor",
-    layout="wide",
-)
+
+
+POSSIBLE_RUN_PROVIDERS = ['SBER', 'VTB', 'NRB', 'AKB']
+
+
 
 
 def _format_change_bp(value: float) -> str:
@@ -65,30 +63,88 @@ def style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, d
     return styled_frame, column_config
 
 
+
+
+@st.dialog('Parse new run(s)')
+def PARSE_RUN_DIALOG() -> None:
+    provider = st.selectbox('Provider:', options=POSSIBLE_RUN_PROVIDERS)
+    run_str = st.text_area('Run data:', placeholder='Paste run text here...')
+    if st.button("Parse"):
+        parse_multiple_runs(run_str, provider=provider)
+        st.rerun()
+
+
+
+
+
+
+
+def DISPLAY_RUNS(runs: list[QuotesRun]) -> None:
+    runs_num = len(runs)
+    cols = st.columns(runs_num)
+    for i, run in enumerate(runs):
+        run_df = run.to_frame(with_changes=True)
+        styled_run_df, run_column_config = style_run_frame(run_df)
+        time = datetime.strptime(run.created_at, "%Y-%m-%d %H:%M:%S.%f").strftime("%d.%m.%Y %H.%M")
+        with cols[i]:
+            st.markdown(f'''
+            **PROVIDER**: {run.provider}  
+            **INSTRUMENT**: {run.instrument}  
+            **UNDERLYING**: {run.underlying}  
+            **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  
+            **TIME**: {time}''')
+            st.toggle("Activate", value=True, key=i)
+            st.dataframe(styled_run_df, hide_index=True, column_config=run_column_config)
+
+
+
+# =====================================================================================
+# setting page
+# =====================================================================================
+st.set_page_config(page_title="Rates Monitor", layout="wide")
+st.bottom.caption("© 2026 DVS Brokers · All rights reserved", text_alignment='center')
+
+
+
+
+
+
+
 # =====================================================================================
 # parse run button
 # =====================================================================================
-with st.popover("PARSE NEW RUN"):
-    st.button("parse")
+if st.button("PARSE NEW RUN"):
+    PARSE_RUN_DIALOG()
+
+
+
+
+
+
 
 
 # =====================================================================================
 # actual runs block
 # =====================================================================================
-actual_runs = RUN_HISTORY.get_actual_runs(as_of=datetime.now())
-runs_num = len(actual_runs)
-cols = st.columns(runs_num)
-for i, run in enumerate(actual_runs):
-    run_df = run.to_frame(with_changes=True)
-    styled_run_df, run_column_config = style_run_frame(run_df)
-    time = datetime.strptime(run.created_at, "%Y-%m-%d %H:%M:%S.%f").strftime("%d.%m.%Y %H.%M")
-    with cols[i]:
-        st.markdown(f'''
-        **PROVIDER**: {run.provider}  
-        **INSTRUMENT**: {run.instrument}  
-        **UNDERLYING**: {run.underlying}  
-        **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  
-        **TIME**: {time}''')
-        st.toggle("Activate", value=True, key=i)
-        st.dataframe(styled_run_df, hide_index=True, column_config=run_column_config)
+
+# fetching runs
+runs = RUN_HISTORY.get_actual_runs(as_of=datetime.now())
+
+
+
+# warning if no runs
+if not runs:
+    st.info("There are no actual runs at the moment.  \n" \
+    "Please use <PARSE NEW RUN> button above to add new run(s).")
+    st.stop()
+
+
+
+# display runs
+DISPLAY_RUNS(runs)
+
+
+
+
+
 
