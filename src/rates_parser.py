@@ -198,6 +198,8 @@ class RunHistoryStore:
                     for tenor, quote in run.quotes.items()
                 ],
             )
+        run.id = run_id
+        run.created_at = stamp.isoformat(sep=" ")
         return stamp
 
     def _row_to_run(self, row: sqlite3.Row) -> "QuotesRun":
@@ -216,6 +218,8 @@ class RunHistoryStore:
             size_value=row["size_value"],
             size_unit=row["size_unit"],
             start_fx_rate=row["start_fx_rate"],
+            id=row["id"],
+            created_at=row["created_at"],
         )
         quote_rows = self._conn.execute(
             "SELECT * FROM quotes WHERE run_id = ? ORDER BY id", (row["id"],)
@@ -260,6 +264,27 @@ class RunHistoryStore:
 
         rows = self._conn.execute(query, params).fetchall()
         return [self._row_to_run(row) for row in rows]
+
+    def get_previous_run(self, run: "QuotesRun") -> "QuotesRun | None":
+        """Return the run stored immediately before ``run`` for the same identity.
+
+        "Same identity" means matching ``provider``, ``underlying``, ``currency``
+        and ``instrument``. Returns ``None`` if ``run`` hasn't been persisted
+        (no ``id``/``created_at``) or if it's the first run for its identity.
+        """
+        if run.id is None or run.created_at is None:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT * FROM runs
+            WHERE provider IS ? AND underlying IS ? AND currency IS ? AND instrument IS ?
+              AND (created_at < ? OR (created_at = ? AND id < ?))
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (run.provider, run.underlying, run.currency, run.instrument, run.created_at, run.created_at, run.id),
+        ).fetchone()
+        return self._row_to_run(row) if row is not None else None
 
     def get_actual_runs(self, as_of: datetime | None = None) -> list["QuotesRun"]:
         """Return the latest run for each identity that is active as of the supplied time."""
@@ -329,6 +354,8 @@ class QuotesRun:
         size_value: float | None = None,
         size_unit: str | None = None,
         start_fx_rate: float | None = None,
+        id: int | None = None,
+        created_at: str | None = None,
     ) -> None:
         self.currency = currency
         self.run_name = run_name
@@ -344,8 +371,10 @@ class QuotesRun:
         self.size_value = size_value
         self.size_unit = size_unit
         self.start_fx_rate = start_fx_rate
+        self.id = id
+        self.created_at = created_at
 
-    def to_frame(self) -> pd.DataFrame:
+    def to_frame(self, with_changes: bool = False) -> pd.DataFrame:
         """Return the parsed quote matrix as a pandas DataFrame.
 
         The frame uses one row per tenor and expands the quote payload to a
@@ -357,6 +386,12 @@ class QuotesRun:
         matching ``*_provider`` keys (used for joint runs built across several
         providers, see :func:`create_joint_runs`); when absent, the worst levels and
         their providers default to the best bid/offer and this run's provider.
+
+        When ``with_changes`` is True, the frame gains ``best_bid_change_bp`` and
+        ``best_offer_change_bp`` columns holding the per-tenor delta, in basis
+        points, against this run's previous run for the same identity (see
+        :meth:`RunHistoryStore.get_previous_run`). Both columns are ``NA`` when
+        there is no previous run, or for tenors absent from it.
         """
         rows = []
         has_end_dates = any(
@@ -394,7 +429,24 @@ class QuotesRun:
             if has_end_dates:
                 row["end_date"] = quote.get("end_date")
             rows.append(row)
-        return pd.DataFrame(rows)
+        frame = pd.DataFrame(rows)
+
+        if with_changes and not frame.empty:
+            previous_run = RUN_HISTORY.get_previous_run(self)
+            bp_scale = 1.0 if is_fx_swap else 100.0
+            if previous_run is not None:
+                previous_levels = previous_run.to_frame()[["tenor", "best_bid", "best_offer"]].rename(
+                    columns={"best_bid": "_prev_best_bid", "best_offer": "_prev_best_offer"}
+                )
+                frame = frame.merge(previous_levels, on="tenor", how="left")
+                frame["best_bid_change_bp"] = (frame["best_bid"] - frame["_prev_best_bid"]) * bp_scale
+                frame["best_offer_change_bp"] = (frame["best_offer"] - frame["_prev_best_offer"]) * bp_scale
+                frame = frame.drop(columns=["_prev_best_bid", "_prev_best_offer"])
+            else:
+                frame["best_bid_change_bp"] = pd.NA
+                frame["best_offer_change_bp"] = pd.NA
+
+        return frame
 
     def as_dict(self) -> dict[str, Any]:
         """Expose the parsed object as a plain dictionary.
