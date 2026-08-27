@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs
 from datetime import datetime
+from streamlit.delta_generator import DeltaGenerator
 
 
 
@@ -65,15 +66,40 @@ def style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, d
 
 
 
-@st.dialog('Parse new run(s)')
+def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont: DeltaGenerator) -> None:
+    """Display parsed runs in the right-hand column of the parse dialog."""
+    col.space()
+    col.subheader(f'Runs parsed successfully: {len(runs)}')
+    col.space('medium')
+    for i, run in enumerate(runs, start=1):
+        col.write(
+            f"RUN #{i}  \n"
+            f"**PROVIDER**: {run.provider}  \n"
+            f"**INSTRUMENT**: {run.instrument}  \n"
+            f"**UNDERLYING**: {run.underlying}  \n"
+            f"**SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  \n"
+        )
+        col.space()
+
+
+
+
+@st.dialog('Parse new run(s)', width='medium')
 def PARSE_RUN_DIALOG() -> None:
-    provider = st.selectbox('Provider:', options=POSSIBLE_RUN_PROVIDERS)
-    run_str = st.text_area('Run data:', placeholder='Paste run text here...')
-    if st.button("Parse"):
-        parse_multiple_runs(run_str, provider=provider)
-        st.rerun()
+    cols = st.columns(2, gap='large')
+    provider = cols[0].selectbox('Provider:', options=POSSIBLE_RUN_PROVIDERS)
+    run_str = cols[0].text_area('Run data:', placeholder='Paste run text here...', height=750)
+    cont = st.container(horizontal=True, horizontal_alignment="distribute")
 
+    if cont.button("Parse"):
+        st.session_state['parsed_runs'] = parse_multiple_runs(run_str, provider=provider)
 
+    parsed_runs = st.session_state.get('parsed_runs')
+    if parsed_runs:
+        _show_parsed_runs_in_dialog(parsed_runs, cols[1], cont)
+        if cont.button('Confirm'):
+            del st.session_state['parsed_runs']
+            st.rerun()
 
 
 
@@ -109,11 +135,11 @@ st.bottom.caption("© 2026 DVS Brokers · All rights reserved", text_alignment='
 
 
 
-
 # =====================================================================================
 # parse run button
 # =====================================================================================
 if st.button("PARSE NEW RUN"):
+    st.session_state.pop('parsed_runs', None)
     PARSE_RUN_DIALOG()
 
 
