@@ -7,6 +7,7 @@ from streamlit.delta_generator import DeltaGenerator
 
 
 POSSIBLE_RUN_PROVIDERS = ['SBER', 'VTB', 'NRB', 'AKB']
+TIGHT_SPREAD_THRESHOLDS_BP = {"OIS": 12, "KRS": 12, "XCCY": 60}
 
 
 
@@ -65,20 +66,37 @@ def _style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, 
 
 
 
-def _style_joint_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, dict]:
+
+
+def _style_joint_run_frame(
+    run_df: pd.DataFrame, instrument: str | None = None
+) -> tuple[pd.io.formats.style.Styler, dict]:
     """Format and style a run's quote frame for display in ``st.dataframe``.
     Applies, in one place:
       1) bold tenor labels
       2) compact 2-decimal bid/offer formatting, avoiding trailing-zero float noise
-        Returns the styled frame together with the ``column_config`` it expects,
+      3) a red row fill where the bid/offer spread is unusually tight for the
+         instrument (< 12 bp for OIS/KRS, < 60 bp for XCCY; see
+         :data:`TIGHT_SPREAD_THRESHOLDS_BP`) -- st.dataframe ignores Styler
+         borders, so a background fill is used instead
+
+    Returns the styled frame together with the ``column_config`` it expects,
     since bid/offer number formatting is handled by ``NumberColumn`` rather
     than the Styler (Streamlit renders those independently).
     """
-    
+
     frame = run_df[['tenor', 'best_bid_provider', 'best_bid', 'mid', 'best_offer', 'best_offer_provider', 'best_bid_offer_spread']].copy()
-    
+
+    tight_spread_threshold = TIGHT_SPREAD_THRESHOLDS_BP.get(instrument)
+
+    def _highlight_tight_spread(row: pd.Series) -> list[str]:
+        if tight_spread_threshold is None or row['best_bid_offer_spread'] >= tight_spread_threshold:
+            return [''] * len(row)
+        return ['background-color: rgba(231, 76, 60, 0.25)'] * len(row)
+
     styled_frame = (
         frame.style
+        .apply(_highlight_tight_spread, axis=1)
         .set_properties(subset=['tenor'], **{'font-weight': 'bold'})
     )
     column_config = {
@@ -139,7 +157,7 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
     for i, run in enumerate(runs):
         run_df = run.to_frame(with_changes=True)
         if mode == 'joint':
-            styled_run_df, run_column_config = _style_joint_run_frame(run_df)
+            styled_run_df, run_column_config = _style_joint_run_frame(run_df, run.instrument)
         else:
             styled_run_df, run_column_config = _style_run_frame(run_df)
         with cols[i]:
