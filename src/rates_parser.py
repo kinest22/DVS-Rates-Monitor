@@ -787,8 +787,6 @@ def create_joint_runs(as_of: datetime | None = None) -> list[QuotesRun]:
             if end_dates:
                 quote_payload["end_date"] = end_dates[0]
             joint_run.quotes[tenor] = quote_payload
-
-        _register_run(joint_run)
         joint_runs.append(joint_run)
 
     return joint_runs
@@ -901,7 +899,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
         if quote_match is None:
             continue
 
-        tenor = quote_match.group("tenor")
+        tenor = quote_match.group("tenor").upper()
         bid = _normalize_decimal(quote_match.group("bid"))
         offer = _normalize_decimal(quote_match.group("offer"))
         quote_payload = {"best_bid": bid, "best_offer": offer}
