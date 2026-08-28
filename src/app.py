@@ -1,6 +1,6 @@
 import pandas as pd
 import streamlit as st
-from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs
+from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs, create_joint_runs
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 
@@ -31,7 +31,7 @@ def _color_change_text(text: str) -> str:
     return ""
 
 
-def style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, dict]:
+def _style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, dict]:
     """Format and style a run's quote frame for display in ``st.dataframe``.
 
     Applies, in one place:
@@ -63,6 +63,34 @@ def style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, d
     }
     return styled_frame, column_config
 
+
+
+def _style_joint_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, dict]:
+    """Format and style a run's quote frame for display in ``st.dataframe``.
+    Applies, in one place:
+      1) bold tenor labels
+      2) compact 2-decimal bid/offer formatting, avoiding trailing-zero float noise
+        Returns the styled frame together with the ``column_config`` it expects,
+    since bid/offer number formatting is handled by ``NumberColumn`` rather
+    than the Styler (Streamlit renders those independently).
+    """
+    
+    frame = run_df[['tenor', 'best_bid_provider', 'best_bid', 'mid', 'best_offer', 'best_offer_provider', 'best_bid_offer_spread']].copy()
+    
+    styled_frame = (
+        frame.style
+        .set_properties(subset=['tenor'], **{'font-weight': 'bold'})
+    )
+    column_config = {
+        'tenor': st.column_config.TextColumn("Tenor", alignment='center'),
+        'best_bid_provider': st.column_config.TextColumn("Provider", alignment='center'),
+        'best_bid': st.column_config.NumberColumn("Bid", alignment='center', format="%.2f"),
+        'mid': st.column_config.NumberColumn("Mid", alignment='center', format="%.2f"),
+        'best_offer': st.column_config.NumberColumn("Offer", alignment='center', format="%.2f"),
+        'best_offer_provider': st.column_config.TextColumn("Provider", alignment='center'),        
+        'best_bid_offer_spread': st.column_config.NumberColumn("Spread", alignment='center', format="%.2f"),        
+    }
+    return styled_frame, column_config
 
 
 
@@ -105,22 +133,31 @@ def PARSE_RUN_DIALOG() -> None:
 
 
 
-def DISPLAY_RUNS(runs: list[QuotesRun]) -> None:
+def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
     runs_num = len(runs)
     cols = st.columns(runs_num)
     for i, run in enumerate(runs):
         run_df = run.to_frame(with_changes=True)
-        styled_run_df, run_column_config = style_run_frame(run_df)
-        time = datetime.strptime(run.created_at, "%Y-%m-%d %H:%M:%S.%f").strftime("%d.%m.%Y %H.%M")
+        if mode == 'joint':
+            styled_run_df, run_column_config = _style_joint_run_frame(run_df)
+        else:
+            styled_run_df, run_column_config = _style_run_frame(run_df)
         with cols[i]:
-            st.markdown(f'''
-            **PROVIDER**: {run.provider}  
-            **INSTRUMENT**: {run.instrument}  
-            **UNDERLYING**: {run.underlying}  
-            **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  
-            **TIME**: {time}''')
-            st.toggle("Activate", value=True, key=i)
-            st.dataframe(styled_run_df, hide_index=True, column_config=run_column_config)
+            if mode == 'normal':            
+                time = datetime.strptime(run.created_at, "%Y-%m-%d %H:%M:%S.%f").strftime("%d.%m.%Y %H.%M")
+                st.markdown(f'''
+                **PROVIDER**: {run.provider}  
+                **INSTRUMENT**: {run.instrument}  
+                **UNDERLYING**: {run.underlying}  
+                **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  
+                **TIME**: {time}''')
+                #st.toggle("Activate", value=True, key=i)
+            else:
+                st.markdown(f'''
+                **JOINT RUN**  
+                **INSTRUMENT**: {run.instrument}  
+                **UNDERLYING**: {run.underlying}''')
+            st.dataframe(styled_run_df, hide_index=True, column_config=run_column_config, height='content')
 
 
 
@@ -167,7 +204,17 @@ if not runs:
 
 
 # display runs
-DISPLAY_RUNS(runs)
+DISPLAY_RUNS(runs, 'normal')
+
+
+
+
+
+# =====================================================================================
+# joint runs block
+# =====================================================================================
+joint_runs = create_joint_runs()
+DISPLAY_RUNS(joint_runs, 'joint')
 
 
 
