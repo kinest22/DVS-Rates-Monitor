@@ -3,6 +3,7 @@ import streamlit as st
 from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs, create_joint_runs
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
+from pandas.io.formats.style import Styler
 
 
 
@@ -32,7 +33,7 @@ def _color_change_text(text: str) -> str:
     return ""
 
 
-def _style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, dict]:
+def _style_run_frame(run_df: pd.DataFrame) -> tuple[Styler, dict]:
     """Format and style a run's quote frame for display in ``st.dataframe``.
 
     Applies, in one place:
@@ -70,7 +71,7 @@ def _style_run_frame(run_df: pd.DataFrame) -> tuple[pd.io.formats.style.Styler, 
 
 def _style_joint_run_frame(
     run_df: pd.DataFrame, instrument: str | None = None
-) -> tuple[pd.io.formats.style.Styler, dict]:
+) -> tuple[Styler, dict]:
     """Format and style a run's quote frame for display in ``st.dataframe``.
     Applies, in one place:
       1) bold tenor labels
