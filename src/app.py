@@ -112,6 +112,48 @@ def _style_joint_run_frame(
 
 
 
+def _narrow_spread_rows(run_df: pd.DataFrame, instrument: str | None) -> pd.DataFrame:
+    """Return the joint-run rows whose bid/offer spread is tight and crossed
+    between two different providers (see :data:`TIGHT_SPREAD_THRESHOLDS_BP`)."""
+    threshold = TIGHT_SPREAD_THRESHOLDS_BP.get(instrument)
+    if threshold is None:
+        return run_df.iloc[0:0]
+    return run_df[
+        (run_df['best_bid_offer_spread'] <= threshold)
+        & (run_df['best_bid_provider'] != run_df['best_offer_provider'])
+    ]
+
+
+def _display_narrow_spread_blocks(run_df: pd.DataFrame, instrument: str | None) -> None:
+    """Below a joint run, write one block per provider showing the opposite
+    side's best bid/offer for that provider's tight-spread tenors, plus a
+    final anonymous market block with no providers noticed."""
+    narrow_rows = _narrow_spread_rows(run_df, instrument)
+    if narrow_rows.empty:
+        return
+
+    providers = sorted(set(narrow_rows['best_bid_provider']) | set(narrow_rows['best_offer_provider']))
+    for provider in providers:
+        lines = []
+        for _, row in narrow_rows.iterrows():
+            tenor, bid, offer = row['tenor'], row['best_bid'], row['best_offer']
+            if row['best_bid_provider'] == provider:
+                lines.append(f"{instrument} {tenor} /{offer:.2f}")
+            elif row['best_offer_provider'] == provider:
+                lines.append(f"{instrument} {tenor} {bid:.2f}/")
+            else:
+                lines.append(f"{instrument} {tenor} {bid:.2f}/{offer:.2f}")
+        st.write(f"**For {provider}:**  \n" + "  \n".join(lines))
+
+    market_lines = [
+        f"{instrument} {row['tenor']} {row['best_bid']:.2f} / {row['best_offer']:.2f}"
+        for _, row in narrow_rows.iterrows()
+    ]
+    st.write("**MARKET:**  \n" + "  \n".join(market_lines))
+
+
+
+
 def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont: DeltaGenerator) -> None:
     """Display parsed runs in the right-hand column of the parse dialog."""
     col.space()
@@ -176,6 +218,8 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
                 **INSTRUMENT**: {run.instrument}  
                 **UNDERLYING**: {run.underlying}''')
             st.dataframe(styled_run_df, hide_index=True, column_config=run_column_config, height='content')
+            if mode == 'joint':
+                _display_narrow_spread_blocks(run_df, run.instrument)
 
 
 
