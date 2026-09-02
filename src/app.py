@@ -275,7 +275,7 @@ DISPLAY_RUNS(runs, 'normal')
 # =====================================================================================
 # joint runs block
 # =====================================================================================
-joint_runs = create_joint_runs()
+joint_runs = create_joint_runs(runs)
 DISPLAY_RUNS(joint_runs, 'joint')
 
 

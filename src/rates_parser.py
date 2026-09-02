@@ -730,7 +730,7 @@ def get_actual_runs(as_of: datetime | None = None) -> list[QuotesRun]:
     return RUN_HISTORY.get_actual_runs(as_of=as_of)
 
 
-def create_joint_runs(as_of: datetime | None = None) -> list[QuotesRun]:
+def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
     """Group the actual runs by instrument, currency, and underlying and join them.
 
     Each provider's latest active run (see :meth:`RunHistoryStore.get_actual_runs`)
@@ -745,7 +745,7 @@ def create_joint_runs(as_of: datetime | None = None) -> list[QuotesRun]:
     :data:`RUN_HISTORY` under the ``"joint"`` provider, same as a parsed run.
     """
     groups: dict[tuple[str | None, str | None, str | None], list[QuotesRun]] = {}
-    for run in RUN_HISTORY.get_actual_runs(as_of=as_of):
+    for run in actual_runs:
         key = (run.instrument, run.currency, run.underlying)
         groups.setdefault(key, []).append(run)
 
