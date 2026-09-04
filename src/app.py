@@ -99,6 +99,7 @@ def _style_joint_run_frame(
         frame.style
         .apply(_highlight_tight_spread, axis=1)
         .set_properties(subset=['tenor'], **{'font-weight': 'bold'})
+        .set_properties(subset=['mid'], **{'color': "#2ecc71"})
     )
     column_config = {
         'tenor': st.column_config.TextColumn("Tenor", alignment='center'),
@@ -212,7 +213,14 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
                 **UNDERLYING**: {run.underlying}  
                 **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  
                 **TIME**: {time}''')
-                #st.toggle("Activate", value=True, key=i)
+                st.segmented_control(
+                    None,
+                    options=['FIRM', 'VIA FRESH'],
+                    default='FIRM',
+                    key=f'run_mode_{run.id}',
+                    width='stretch',
+                    label_visibility='collapsed'
+                )
             else:
                 st.markdown(f'''
                 **JOINT RUN**  
@@ -252,7 +260,7 @@ if st.button("PARSE NEW RUN"):
 # =====================================================================================
 # actual runs block
 # =====================================================================================
-
+st.divider()
 # fetching runs
 runs = RUN_HISTORY.get_actual_runs(as_of=datetime.now())
 
@@ -276,8 +284,17 @@ DISPLAY_RUNS(runs, 'normal')
 # =====================================================================================
 # joint runs block
 # =====================================================================================
-joint_runs = create_joint_runs(runs)
-DISPLAY_RUNS(joint_runs, 'joint')
+st.divider()
+firm_runs = [
+    run for run in runs
+    if st.session_state.get(f'run_mode_{run.id}', 'FIRM') == 'FIRM'
+]
+joint_runs = create_joint_runs(firm_runs)
+if joint_runs:
+    DISPLAY_RUNS(joint_runs, 'joint')
+else:
+    st.info('No firm runs selected for joint runs.')
+
 
 
 
