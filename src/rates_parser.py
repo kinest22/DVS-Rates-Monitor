@@ -86,6 +86,13 @@ CURRENCY_CODES = frozenset({"RUB", "USD", "CNY", "CNH", "EUR"})
 INSTRUMENT_TYPES = frozenset({"OIS", "KRS", "IRS", "XCCY", "CCIRS", "FXSWAP"})
 INDICATOR_CODES = frozenset({"RUONIA", "SOFR", "RUSFAR", "RUSFARON", "KEYRATE", "KEY RATE"})
 HEADER_IGNORE_TOKENS = frozenset({"RUN", "SWAP", "BID", "OFFER", "TERM", "END"})
+INSTRUMENT_DEFAULTS = {
+    "OIS": {"currency": "RUB", "underlying": "RUONIA/RUB", "size": "1k", "size_type": "dv", "size_currency": "USD"},
+    "KRS": {"currency": "RUB", "underlying": "KEYRATE/RUB", "size": "1k", "size_type": "dv", "size_currency": "USD"},
+    "XCCY": {"currency": "CNH", "underlying": "RUONIA/CNH", "size": "100mio", "size_type": "par", "size_currency": "CNH"},
+    "CCIRS": {"currency": "CNH", "underlying": "RUONIA/CNH", "size": "100mio", "size_type": "par", "size_currency": "CNH"},
+    "FXSWAP": {"currency": "CNH", "underlying": "CNH/RUB", "size": "100mio", "size_type": "par", "size_currency": "CNH"},
+}
 
 HEADER_RE = re.compile(
     r"^(?P<currency>[A-Z]{3})\s+(?P<run_name>.+)$",
@@ -555,6 +562,40 @@ def _normalize_size_type(raw_size_type: str | None) -> str | None:
     return "par"
 
 
+def _parse_header_size(header_text: str, default: dict[str, str] | None) -> tuple[str | None, str | None, str | None, float | None, str | None]:
+    """Read an optional size declaration embedded in a run header."""
+    if default is None:
+        return None, None, None, None, None
+
+    size_match = re.search(
+        r"\b(?:IN|SIZE)\s+(?P<size_value>\d+(?:[.,]\d+)?)\s*"
+        r"(?P<size_unit>mio|mln|bio|bln|b|k|m)?\s*"
+        r"(?P<size_currency>RUB|USD|CNY|CNH|EUR)?",
+        header_text,
+        flags=re.IGNORECASE,
+    )
+    if size_match is None:
+        return None, None, None, None, None
+
+    default_size_match = re.fullmatch(
+        r"(?P<size_value>\d+(?:[.,]\d+)?)(?P<size_unit>mio|mln|bio|bln|b|k|m)",
+        default["size"],
+        flags=re.IGNORECASE,
+    )
+    default_unit = default_size_match.group("size_unit") if default_size_match else None
+    raw_unit = size_match.group("size_unit") or default_unit
+    normalized_size, numeric_size, canonical_unit = _normalize_size(
+        size_match.group("size_value"), raw_unit
+    )
+    return (
+        normalized_size,
+        _normalize_size_type(default["size_type"]),
+        (size_match.group("size_currency") or default["size_currency"]).upper(),
+        numeric_size,
+        canonical_unit,
+    )
+
+
 def _normalize_token(token: str) -> str:
     """Normalize header aliases such as ``KEY RATE`` and ``FX SWAP``.
 
@@ -692,7 +733,7 @@ def _is_run_header_line(line: str) -> bool:
 
     parts = line.split()
     if len(parts) < 2:
-        return False
+        return parts[0].upper() in INSTRUMENT_TYPES
 
     # Headers may lead with a currency (``RUB KRS run``) or, for cross-currency
     # instruments, with the instrument family instead (``XCCY CNH/RUONIA run``).
@@ -703,6 +744,11 @@ def _is_run_header_line(line: str) -> bool:
 def _register_run(run: "QuotesRun") -> None:
     """Store a parsed run globally and attach it to its identity-based history."""
     RUN_HISTORY.add(run)
+
+
+def register_run(run: "QuotesRun") -> None:
+    """Persist a previously parsed run in the run history."""
+    _register_run(run)
 
 
 def get_run_history(
@@ -840,7 +886,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
     if header_match is None:
         full_header = header_line
         parts = full_header.split()
-        if len(parts) < 2:
+        if len(parts) < 2 and not _is_instrument_token(parts[0].upper()):
             raise ValueError(f"Could not parse swap run header: {header_line!r}")
         currency = "RUB"
         if parts[0] in CURRENCY_CODES:
@@ -855,15 +901,64 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
     header_tokens = _tokenize_header(full_header)
     parsed_currency, instrument_type, underlying_indicator, recognized_tokens, unrecognized_tokens = _infer_header_metadata(header_tokens)
 
+    defaults = INSTRUMENT_DEFAULTS.get(instrument_type or "")
+    explicit_currency = None
+    explicit_underlying_token = next(
+        (token for token in header_tokens if _is_indicator_token(token)), None
+    )
+    explicit_underlying = explicit_underlying_token is not None
+    if header_tokens:
+        if _is_currency_token(header_tokens[0]):
+            explicit_currency = header_tokens[0]
+        elif instrument_type in {"XCCY", "CCIRS", "FXSWAP"}:
+            currency_tokens = [token for token in header_tokens if _is_currency_token(token)]
+            if currency_tokens:
+                explicit_currency = currency_tokens[0]
+            if instrument_type == "FXSWAP" and len(currency_tokens) >= 2:
+                explicit_underlying = True
+
+    effective_currency = explicit_currency or (defaults["currency"] if defaults else parsed_currency or currency)
+    effective_underlying = (
+        explicit_underlying_token
+        if explicit_underlying
+        else (defaults["underlying"] if defaults else underlying_indicator)
+    )
     swap_run = QuotesRun(
-        currency=(parsed_currency or currency).upper(),
+        currency=effective_currency.upper(),
         run_name=run_name,
         instrument=instrument_type,
-        underlying=underlying_indicator,
+        underlying=effective_underlying,
         provider=provider,
         header_tokens=header_tokens,
         unrecognized_tokens=unrecognized_tokens,
     )
+
+    if defaults is not None:
+        default_size_match = re.fullmatch(
+            r"(?P<size_value>\d+(?:[.,]\d+)?)(?P<size_unit>mio|mln|bio|bln|b|k|m)",
+            defaults["size"],
+            flags=re.IGNORECASE,
+        )
+        if default_size_match is None:
+            raise ValueError(f"Invalid default size for {instrument_type}: {defaults['size']!r}")
+        default_size, default_value, default_unit = _normalize_size(
+            default_size_match.group("size_value"), default_size_match.group("size_unit")
+        )
+        swap_run.size = default_size
+        swap_run.size_type = defaults["size_type"]
+        swap_run.size_currency = defaults["size_currency"]
+        swap_run.size_value = default_value
+        swap_run.size_unit = default_unit
+
+        header_size = _parse_header_size(header_line, defaults)
+        if header_size[0] is not None:
+            (
+                swap_run.size,
+                swap_run.size_type,
+                swap_run.size_currency,
+                swap_run.size_value,
+                swap_run.size_unit,
+            ) = header_size
 
     # Everything after the header is treated as a quote body, with an optional
     # footer that contains size and start-rate metadata.
@@ -871,7 +966,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
     if body_lines:
         last_line = body_lines[-1]
         footer_match = FOOTER_RE.match(last_line)
-        if footer_match is not None:
+        if footer_match is not None and QUOTE_RE.match(last_line) is None:
             normalized_size, numeric_size, canonical_unit = _normalize_size(
                 footer_match.group("size_value"),
                 footer_match.group("size_unit"),
@@ -908,5 +1003,4 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
             quote_payload["end_date"] = end_date
         swap_run.quotes[tenor] = quote_payload
 
-    _register_run(swap_run)
     return swap_run
