@@ -1,6 +1,6 @@
 import pandas as pd
 import streamlit as st
-from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs, create_joint_runs
+from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs, create_joint_runs, register_run
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
@@ -167,7 +167,7 @@ def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont
             f"**PROVIDER**: {run.provider}  \n"
             f"**INSTRUMENT**: {run.instrument}  \n"
             f"**UNDERLYING**: {run.underlying}  \n"
-            f"**SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  \n"
+            f"**SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.size_currency}  \n"
         )
         col.space()
 
@@ -188,6 +188,8 @@ def PARSE_RUN_DIALOG() -> None:
     if parsed_runs:
         _show_parsed_runs_in_dialog(parsed_runs, cols[1], cont)
         if cont.button('Confirm'):
+            for run in parsed_runs:
+                register_run(run)
             del st.session_state['parsed_runs']
             st.rerun()
 
@@ -211,7 +213,7 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
                 **PROVIDER**: {run.provider}  
                 **INSTRUMENT**: {run.instrument}  
                 **UNDERLYING**: {run.underlying}  
-                **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.currency}  
+                **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.size_currency}  
                 **TIME**: {time}''')
                 st.segmented_control(
                     None,
