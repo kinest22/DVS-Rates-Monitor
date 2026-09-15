@@ -190,6 +190,7 @@ def PARSE_RUN_DIALOG() -> None:
         if cont.button('Confirm'):
             for run in parsed_runs:
                 register_run(run)
+                st.session_state.setdefault('load_toasts', []).append(f"{run.instrument} run from {run.provider} loaded.")
             del st.session_state['parsed_runs']
             st.rerun()
 
@@ -251,6 +252,14 @@ st.bottom.caption("© 2026 DVS Brokers · All rights reserved", text_alignment='
 if st.button("PARSE NEW RUN"):
     st.session_state.pop('parsed_runs', None)
     PARSE_RUN_DIALOG()
+
+
+
+# =====================================================================================
+# notifications block
+# =====================================================================================
+for toast_message in st.session_state.pop('load_toasts', []):
+    st.toast(toast_message, icon=":material/table_convert:")
 
 
 
