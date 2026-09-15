@@ -919,7 +919,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
 
     effective_currency = explicit_currency or (defaults["currency"] if defaults else parsed_currency or currency)
     effective_underlying = (
-        explicit_underlying_token
+        underlying_indicator
         if explicit_underlying
         else (defaults["underlying"] if defaults else underlying_indicator)
     )
@@ -973,7 +973,10 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
             )
             swap_run.size = normalized_size
             swap_run.size_type = _normalize_size_type(footer_match.group("size_type"))
-            swap_run.size_currency = (footer_match.group("size_currency") or swap_run.currency).upper()
+            swap_run.size_currency = (
+                footer_match.group("size_currency")
+                or (defaults["size_currency"] if defaults else swap_run.currency)
+            ).upper()
             swap_run.size_value = numeric_size
             swap_run.size_unit = canonical_unit
 
