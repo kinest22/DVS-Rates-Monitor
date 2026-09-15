@@ -105,7 +105,7 @@ def _style_joint_run_frame(
         'tenor': st.column_config.TextColumn("Tenor", alignment='center'),
         'best_bid_provider': st.column_config.TextColumn("Provider", alignment='center'),
         'best_bid': st.column_config.NumberColumn("Bid", alignment='center', format="%.2f"),
-        'mid': st.column_config.NumberColumn("Mid", alignment='center', format="%.2f"),
+        'mid': st.column_config.NumberColumn("Mid", alignment='center', format="%.3f"),
         'best_offer': st.column_config.NumberColumn("Offer", alignment='center', format="%.2f"),
         'best_offer_provider': st.column_config.TextColumn("Provider", alignment='center'),        
         'best_bid_offer_spread': st.column_config.NumberColumn("Spread", alignment='center', format="%.2f"),        
