@@ -222,3 +222,7 @@ __marimo__/
 /data/*.db-journal
 /data/*.db-shm
 /data/*.db-wal
+
+# Executables
+*.bat
+*.exe
