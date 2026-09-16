@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 import core
-from rates_parser import QuotesRun, parse_multiple_runs, create_joint_runs, register_run
+from parsing import QuotesRun, parse_multiple_runs, create_joint_runs, register_run
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
