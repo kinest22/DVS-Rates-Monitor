@@ -1,4 +1,4 @@
-"""Utilities for parsing swap-run text blocks into structured SwapRun objects.
+"""Utilities for parsing swap-run text blocks into structured QuotesRun objects.
 
 The module is intentionally lightweight and works directly on raw text captured
 from market-run reports. It exposes:
@@ -6,437 +6,160 @@ from market-run reports. It exposes:
 - a single-run parser, :func:`parse_swap_run`
 - a multi-run parser, :func:`parse_multiple_runs`
 - a small set of normalization/helpers used to infer instrument and size metadata
+- presentation helpers (:func:`run_to_frame`, :func:`run_as_dict`, :func:`format_run`)
+  operating on :class:`core.QuotesRun` instances, which are otherwise a plain
+  data holder defined in :mod:`core`
 
-The public API returns a :class:`SwapRun` instance with a compact string
-representation suitable for notebook or console inspection.
+The public API returns a :class:`core.QuotesRun` instance with a compact string
+representation (see :func:`format_run`) suitable for notebook or console inspection.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from pathlib import Path
 from typing import Any
-import json
 import re
-import sqlite3
-import threading
 
 import pandas as pd
 import core
-
-HistoryKey = tuple[str | None, str | None, str | None, str | None]
-
-
-class RunHistoryStore:
-    """Persist parsed runs in SQLite and expose latest active runs by identity."""
-
-    def __init__(self, db_path: str | Path = core.DEFAULT_DB_PATH) -> None:
-        self.db_path = str(db_path)
-        if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._local = threading.local()
-        self._all_conns: list[sqlite3.Connection] = []
-        self._conns_lock = threading.Lock()
-        with self._conn:
-            self._conn.executescript(core.SCHEMA_SQL)
-
-    def _new_connection(self) -> sqlite3.Connection:
-        """Open a fresh connection for the calling thread.
-
-        Streamlit reruns each session's script in its own worker thread, and
-        sqlite3 connections are bound to the thread that created them, so a
-        single shared connection silently breaks across reruns. Each thread
-        gets its own connection to the same on-disk database instead; WAL
-        mode lets those connections read/write concurrently without locking
-        each other out.
-        """
-        conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        if self.db_path != ":memory:":
-            conn.execute("PRAGMA journal_mode = WAL")
-        with self._conns_lock:
-            self._all_conns.append(conn)
-        return conn
-
-    @property
-    def _conn(self) -> sqlite3.Connection:
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = self._new_connection()
-            self._local.conn = conn
-        return conn
-
-    def add(self, run: "QuotesRun", timestamp: datetime | None = None) -> datetime:
-        """Persist a run and its quotes, returning the timestamp it was stored under."""
-        stamp = timestamp or datetime.now()
-        with self._conn:
-            cursor = self._conn.execute(
-                """
-                INSERT INTO runs (
-                    provider, currency, instrument, underlying, run_name,
-                    header_tokens, unrecognized_tokens, size, size_type,
-                    size_currency, size_value, size_unit, start_fx_rate, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run.provider,
-                    run.currency,
-                    run.instrument,
-                    run.underlying,
-                    run.run_name,
-                    json.dumps(run.header_tokens),
-                    json.dumps(run.unrecognized_tokens),
-                    run.size,
-                    run.size_type,
-                    run.size_currency,
-                    run.size_value,
-                    run.size_unit,
-                    run.start_fx_rate,
-                    stamp.isoformat(sep=" "),
-                ),
-            )
-            run_id = cursor.lastrowid
-            self._conn.executemany(
-                """
-                INSERT INTO quotes (
-                    run_id, tenor, worst_bid_provider, worst_bid, best_bid_provider, best_bid,
-                    mid, best_offer, best_offer_provider, worst_offer, worst_offer_provider, end_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        run_id,
-                        tenor,
-                        quote.get("worst_bid_provider", run.provider),
-                        quote.get("worst_bid"),
-                        quote.get("best_bid_provider", run.provider),
-                        quote["best_bid"],
-                        (float(quote["best_bid"]) + float(quote["best_offer"])) / 2.0,
-                        quote["best_offer"],
-                        quote.get("best_offer_provider", run.provider),
-                        quote.get("worst_offer"),
-                        quote.get("worst_offer_provider", run.provider),
-                        quote.get("end_date"),
-                    )
-                    for tenor, quote in run.quotes.items()
-                ],
-            )
-        run.id = run_id
-        run.created_at = stamp.isoformat(sep=" ")
-        return stamp
-
-    def _row_to_run(self, row: sqlite3.Row) -> "QuotesRun":
-        """Reconstruct a :class:`QuotesRun` from a ``runs`` row and its ``quotes`` rows."""
-        run = QuotesRun(
-            currency=row["currency"],
-            run_name=row["run_name"],
-            instrument=row["instrument"],
-            underlying=row["underlying"],
-            provider=row["provider"],
-            header_tokens=json.loads(row["header_tokens"]) if row["header_tokens"] else [],
-            unrecognized_tokens=json.loads(row["unrecognized_tokens"]) if row["unrecognized_tokens"] else [],
-            size=row["size"],
-            size_type=row["size_type"],
-            size_currency=row["size_currency"],
-            size_value=row["size_value"],
-            size_unit=row["size_unit"],
-            start_fx_rate=row["start_fx_rate"],
-            id=row["id"],
-            created_at=row["created_at"],
-        )
-        quote_rows = self._conn.execute(
-            "SELECT * FROM quotes WHERE run_id = ? ORDER BY id", (row["id"],)
-        ).fetchall()
-        for quote_row in quote_rows:
-            payload: dict[str, Any] = {"best_bid": quote_row["best_bid"], "best_offer": quote_row["best_offer"]}
-            for column in core.QUOTE_OPTIONAL_COLUMNS:
-                value = quote_row[column]
-                if value is not None:
-                    payload[column] = value
-            run.quotes[quote_row["tenor"]] = payload
-        return run
-
-    def get_history(
-        self,
-        provider: str | None = None,
-        underlying: str | None = None,
-        currency: str | None = None,
-        instrument: str | None = None,
-        as_of: datetime | None = None,
-    ) -> list["QuotesRun"]:
-        """Return the chronological history for a run identity, optionally up to a point in time."""
-        clauses = []
-        params: list[Any] = []
-        for column, value in (
-            ("provider", provider),
-            ("underlying", underlying),
-            ("currency", currency),
-            ("instrument", instrument),
-        ):
-            if value is not None:
-                clauses.append(f"{column} = ?")
-                params.append(value)
-        if as_of is not None:
-            clauses.append("created_at <= ?")
-            params.append(as_of.isoformat(sep=" "))
-
-        query = "SELECT * FROM runs"
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY created_at, id"
-
-        rows = self._conn.execute(query, params).fetchall()
-        return [self._row_to_run(row) for row in rows]
-
-    def get_previous_run(self, run: "QuotesRun") -> "QuotesRun | None":
-        """Return the run stored immediately before ``run`` for the same identity.
-
-        "Same identity" means matching ``provider``, ``underlying``, ``currency``
-        and ``instrument``. Returns ``None`` if ``run`` hasn't been persisted
-        (no ``id``/``created_at``) or if it's the first run for its identity.
-        """
-        if run.id is None or run.created_at is None:
-            return None
-        row = self._conn.execute(
-            """
-            SELECT * FROM runs
-            WHERE provider IS ? AND underlying IS ? AND currency IS ? AND instrument IS ?
-              AND (created_at < ? OR (created_at = ? AND id < ?))
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            """,
-            (run.provider, run.underlying, run.currency, run.instrument, run.created_at, run.created_at, run.id),
-        ).fetchone()
-        return self._row_to_run(row) if row is not None else None
-
-    def get_actual_runs(self, as_of: datetime | None = None) -> list["QuotesRun"]:
-        """Return the latest run for each identity that is active as of the supplied time."""
-        query = "SELECT * FROM runs"
-        params: list[Any] = []
-        if as_of is not None:
-            query += " WHERE created_at <= ?"
-            params.append(as_of.isoformat(sep=" "))
-        query += " ORDER BY created_at, id"
-
-        rows = self._conn.execute(query, params).fetchall()
-        candidates: dict[HistoryKey, sqlite3.Row] = {}
-        for row in rows:
-            key = (row["provider"], row["underlying"], row["currency"], row["instrument"])
-            current = candidates.get(key)
-            if current is None or row["created_at"] > current["created_at"]:
-                candidates[key] = row
-
-        ordered_rows = sorted(candidates.values(), key=lambda row: (row["created_at"], row["id"]))
-        return [self._row_to_run(row) for row in ordered_rows]
-
-    def clear(self) -> None:
-        """Delete all stored runs and quotes from the database."""
-        with self._conn:
-            self._conn.execute("DELETE FROM quotes")
-            self._conn.execute("DELETE FROM runs")
-
-    def close(self) -> None:
-        """Close every per-thread SQLite connection opened so far."""
-        with self._conns_lock:
-            conns, self._all_conns = self._all_conns, []
-        for conn in conns:
-            conn.close()
-        self._local.conn = None
+import data
+from core import QuotesRun
 
 
-# Initialize the shared singleton after RunHistoryStore is declared here.
-core.RUN_HISTORY = RunHistoryStore()
+def run_to_frame(run: QuotesRun, with_changes: bool = False) -> pd.DataFrame:
+    """Return a run's parsed quote matrix as a pandas DataFrame.
 
+    The frame uses one row per tenor and expands the quote payload to a
+    provider-aware ranking layout where the bid/offer descriptors are kept
+    explicit. For a single-provider run, the best and bad levels propagate the
+    same numeric values and provider label, matching the expected display.
 
+    A quote payload may optionally carry ``worst_bid``, ``worst_offer`` and their
+    matching ``*_provider`` keys (used for joint runs built across several
+    providers, see :func:`create_joint_runs`); when absent, the worst levels and
+    their providers default to the best bid/offer and this run's provider.
 
-class QuotesRun:
-    """Parsed representation of an interest-rate swap run.
-
-    Attributes:
-        currency: three-letter currency code, e.g. ``RUB``.
-        run_name: full header text without ``Bid``/``Offer`` words.
-        instrument: swap family, e.g. ``OIS``, ``KRS``, ``XCCY`` or ``CCIRS``.
-        underlying: swap reference curve(s), e.g. ``RUONIA`` or ``RUONIA/SOFR``.
-        quotes: mapping from tenor such as ``3M`` to ``{"best_bid": ..., "best_offer": ...}``.
-        size: quantity printed in the run footer, e.g. ``1k``.
-        size_type: the sizing descriptor printed next to the quantity, e.g. ``DV``.
-        size_currency: the currency descriptor printed next to the quantity, e.g. ``USD``.
+    When ``with_changes`` is True, the frame gains ``best_bid_change_bp`` and
+    ``best_offer_change_bp`` columns holding the per-tenor delta, in basis
+    points, against ``run``'s previous run for the same identity (see
+    :func:`data.get_previous_run`). Both columns are ``NA`` when there is no
+    previous run, or for tenors absent from it.
     """
+    rows = []
+    has_end_dates = any(
+        isinstance(quote, dict) and quote.get("end_date") is not None
+        for quote in run.quotes.values()
+    )
+    provider = run.provider
+    is_fx_swap = run.instrument == "FXSWAP"
 
-    def __init__(
-        self,
-        currency: str,
-        run_name: str,
-        instrument: str | None = None,
-        underlying: str | None = None,
-        provider: str | None = None,
-        header_tokens: list[str] | None = None,
-        unrecognized_tokens: list[str] | None = None,
-        quotes: dict[str, dict[str, float]] | None = None,
-        size: str | None = None,
-        size_type: str | None = None,
-        size_currency: str | None = None,
-        size_value: float | None = None,
-        size_unit: str | None = None,
-        start_fx_rate: float | None = None,
-        id: int | None = None,
-        created_at: str | None = None,
-    ) -> None:
-        self.currency = currency
-        self.run_name = run_name
-        self.instrument = instrument
-        self.underlying = underlying
-        self.provider = provider
-        self.header_tokens = header_tokens or []
-        self.unrecognized_tokens = unrecognized_tokens or []
-        self.quotes = quotes or {}
-        self.size = size
-        self.size_type = size_type
-        self.size_currency = size_currency
-        self.size_value = size_value
-        self.size_unit = size_unit
-        self.start_fx_rate = start_fx_rate
-        self.id = id
-        self.created_at = created_at
+    for tenor, quote in run.quotes.items():
+        best_bid = float(quote["best_bid"])
+        best_offer = float(quote["best_offer"])
+        worst_bid = float(quote.get("worst_bid", best_bid))
+        worst_offer = float(quote.get("worst_offer", best_offer))
+        mid = (best_bid + best_offer) / 2.0
+        spread = best_offer - best_bid
+        spread_bp = spread * 100.0 if not is_fx_swap else spread
+        worst_spread = worst_offer - worst_bid
+        worst_spread_bp = worst_spread * 100.0 if not is_fx_swap else worst_spread
 
-    def to_frame(self, with_changes: bool = False) -> pd.DataFrame:
-        """Return the parsed quote matrix as a pandas DataFrame.
-
-        The frame uses one row per tenor and expands the quote payload to a
-        provider-aware ranking layout where the bid/offer descriptors are kept
-        explicit. For a single-provider run, the best and bad levels propagate the
-        same numeric values and provider label, matching the expected display.
-
-        A quote payload may optionally carry ``worst_bid``, ``worst_offer`` and their
-        matching ``*_provider`` keys (used for joint runs built across several
-        providers, see :func:`create_joint_runs`); when absent, the worst levels and
-        their providers default to the best bid/offer and this run's provider.
-
-        When ``with_changes`` is True, the frame gains ``best_bid_change_bp`` and
-        ``best_offer_change_bp`` columns holding the per-tenor delta, in basis
-        points, against this run's previous run for the same identity (see
-        :meth:`RunHistoryStore.get_previous_run`). Both columns are ``NA`` when
-        there is no previous run, or for tenors absent from it.
-        """
-        rows = []
-        has_end_dates = any(
-            isinstance(quote, dict) and quote.get("end_date") is not None
-            for quote in self.quotes.values()
-        )
-        provider = self.provider
-        is_fx_swap = self.instrument == "FXSWAP"
-
-        for tenor, quote in self.quotes.items():
-            best_bid = float(quote["best_bid"])
-            best_offer = float(quote["best_offer"])
-            worst_bid = float(quote.get("worst_bid", best_bid))
-            worst_offer = float(quote.get("worst_offer", best_offer))
-            mid = (best_bid + best_offer) / 2.0
-            spread = best_offer - best_bid
-            spread_bp = spread * 100.0 if not is_fx_swap else spread
-            worst_spread = worst_offer - worst_bid
-            worst_spread_bp = worst_spread * 100.0 if not is_fx_swap else worst_spread
-
-            row = {
-                "tenor": tenor,
-                "worst_bid_provider": quote.get("worst_bid_provider", provider),
-                "worst_bid": worst_bid,
-                "best_bid_provider": quote.get("best_bid_provider", provider),
-                "best_bid": best_bid,
-                "mid": mid,
-                "best_offer": best_offer,
-                "best_offer_provider": quote.get("best_offer_provider", provider),
-                "worst_offer": worst_offer,
-                "worst_offer_provider": quote.get("worst_offer_provider", provider),
-                "best_bid_offer_spread": spread_bp,
-                "worst_bid_offer_spread": worst_spread_bp,
-            }
-            if has_end_dates:
-                row["end_date"] = quote.get("end_date")
-            rows.append(row)
-        frame = pd.DataFrame(rows)
-
-        if with_changes and not frame.empty:
-            previous_run = core.RUN_HISTORY.get_previous_run(self)
-            bp_scale = 1.0 if is_fx_swap else 100.0
-            if previous_run is not None:
-                previous_levels = previous_run.to_frame()[["tenor", "best_bid", "best_offer"]].rename(
-                    columns={"best_bid": "_prev_best_bid", "best_offer": "_prev_best_offer"}
-                )
-                frame = frame.merge(previous_levels, on="tenor", how="left")
-                frame["best_bid_change_bp"] = (frame["best_bid"] - frame["_prev_best_bid"]) * bp_scale
-                frame["best_offer_change_bp"] = (frame["best_offer"] - frame["_prev_best_offer"]) * bp_scale
-                frame = frame.drop(columns=["_prev_best_bid", "_prev_best_offer"])
-            else:
-                frame["best_bid_change_bp"] = pd.NA
-                frame["best_offer_change_bp"] = pd.NA
-
-        return frame
-
-    def as_dict(self) -> dict[str, Any]:
-        """Expose the parsed object as a plain dictionary.
-
-        This is useful for notebook inspection, serialization, or exporting the
-        parsed run to JSON-like structures.
-        """
-        return {
-            "currency": self.currency,
-            "run_name": self.run_name,
-            "instrument": self.instrument,
-            "underlying": self.underlying,
-            "provider": self.provider,
-            "header_tokens": self.header_tokens,
-            "unrecognized_tokens": self.unrecognized_tokens,
-            "size": self.size,
-            "size_type": self.size_type,
-            "size_currency": self.size_currency,
-            "size_value": self.size_value,
-            "size_unit": self.size_unit,
-            "start_fx_rate": self.start_fx_rate,
-            "quotes": self.quotes,
+        row = {
+            "tenor": tenor,
+            "worst_bid_provider": quote.get("worst_bid_provider", provider),
+            "worst_bid": worst_bid,
+            "best_bid_provider": quote.get("best_bid_provider", provider),
+            "best_bid": best_bid,
+            "mid": mid,
+            "best_offer": best_offer,
+            "best_offer_provider": quote.get("best_offer_provider", provider),
+            "worst_offer": worst_offer,
+            "worst_offer_provider": quote.get("worst_offer_provider", provider),
+            "best_bid_offer_spread": spread_bp,
+            "worst_bid_offer_spread": worst_spread_bp,
         }
+        if has_end_dates:
+            row["end_date"] = quote.get("end_date")
+        rows.append(row)
+    frame = pd.DataFrame(rows)
 
-    def __repr__(self) -> str:
-        """Return the same readable representation used for display."""
-        return self.__str__()
+    if with_changes and not frame.empty:
+        previous_run = data.get_previous_run(run)
+        bp_scale = 1.0 if is_fx_swap else 100.0
+        if previous_run is not None:
+            previous_levels = run_to_frame(previous_run)[["tenor", "best_bid", "best_offer"]].rename(
+                columns={"best_bid": "_prev_best_bid", "best_offer": "_prev_best_offer"}
+            )
+            frame = frame.merge(previous_levels, on="tenor", how="left")
+            frame["best_bid_change_bp"] = (frame["best_bid"] - frame["_prev_best_bid"]) * bp_scale
+            frame["best_offer_change_bp"] = (frame["best_offer"] - frame["_prev_best_offer"]) * bp_scale
+            frame = frame.drop(columns=["_prev_best_bid", "_prev_best_offer"])
+        else:
+            frame["best_bid_change_bp"] = pd.NA
+            frame["best_offer_change_bp"] = pd.NA
 
-    def __str__(self) -> str:
-        """Render a compact multi-line summary of the run.
+    return frame
 
-        The output keeps the metadata block on separate lines, puts the size in a
-        single compact row, and follows it with a quote table.
-        """
-        frame = self.to_frame()
-        quote_table = frame.to_string(index=False) if not frame.empty else "(no quotes)"
 
-        metadata_lines = ["SwapRun"]
-        metadata_pairs = [
-            ("instrument", self.instrument),
-            ("currency", self.currency),
-            ("underlying", self.underlying),
-            ("provider", self.provider),
-            ("start_fx_rate", self.start_fx_rate),
-        ]
+def run_as_dict(run: QuotesRun) -> dict[str, Any]:
+    """Expose a run as a plain dictionary.
 
-        for field_name, value in metadata_pairs:
-            if value in (None, "", [], {}):
-                continue
-            metadata_lines.append(f"  {field_name}: {value}")
+    This is useful for notebook inspection, serialization, or exporting the
+    parsed run to JSON-like structures.
+    """
+    return {
+        "currency": run.currency,
+        "run_name": run.run_name,
+        "instrument": run.instrument,
+        "underlying": run.underlying,
+        "provider": run.provider,
+        "header_tokens": run.header_tokens,
+        "unrecognized_tokens": run.unrecognized_tokens,
+        "size": run.size,
+        "size_type": run.size_type,
+        "size_currency": run.size_currency,
+        "size_value": run.size_value,
+        "size_unit": run.size_unit,
+        "start_fx_rate": run.start_fx_rate,
+        "quotes": run.quotes,
+    }
 
-        size_display_parts = []
-        if self.size is not None:
-            size_display_parts.append(self.size)
-        if self.size_type is not None:
-            size_display_parts.append(self.size_type.upper())
-        if self.size_currency is not None:
-            size_display_parts.append(self.size_currency)
 
-        if size_display_parts:
-            metadata_lines.append(f"  size: {' '.join(size_display_parts)}")
+def format_run(run: QuotesRun) -> str:
+    """Render a compact multi-line summary of a run.
 
-        metadata_block = "\n".join(metadata_lines)
-        return f"{metadata_block}\n\n{quote_table}"
+    The output keeps the metadata block on separate lines, puts the size in a
+    single compact row, and follows it with a quote table.
+    """
+    frame = run_to_frame(run)
+    quote_table = frame.to_string(index=False) if not frame.empty else "(no quotes)"
+
+    metadata_lines = ["QuotesRun"]
+    metadata_pairs = [
+        ("instrument", run.instrument),
+        ("currency", run.currency),
+        ("underlying", run.underlying),
+        ("provider", run.provider),
+        ("start_fx_rate", run.start_fx_rate),
+    ]
+
+    for field_name, value in metadata_pairs:
+        if value in (None, "", [], {}):
+            continue
+        metadata_lines.append(f"  {field_name}: {value}")
+
+    size_display_parts = []
+    if run.size is not None:
+        size_display_parts.append(run.size)
+    if run.size_type is not None:
+        size_display_parts.append(run.size_type.upper())
+    if run.size_currency is not None:
+        size_display_parts.append(run.size_currency)
+
+    if size_display_parts:
+        metadata_lines.append(f"  size: {' '.join(size_display_parts)}")
+
+    metadata_block = "\n".join(metadata_lines)
+    return f"{metadata_block}\n\n{quote_table}"
 
 
 def _normalize_decimal(value: str) -> float:
@@ -660,54 +383,18 @@ def _is_run_header_line(line: str) -> bool:
     return leading_token in core.CURRENCY_CODES or leading_token in core.INSTRUMENT_TYPES
 
 
-def _register_run(run: "QuotesRun") -> None:
-    """Store a parsed run globally and attach it to its identity-based history."""
-    core.RUN_HISTORY.add(run)
-
-
-def register_run(run: "QuotesRun") -> None:
-    """Persist a previously parsed run in the run history."""
-    _register_run(run)
-
-
-def get_run_history(
-    provider: str | None = None,
-    underlying: str | None = None,
-    currency: str | None = None,
-    instrument: str | None = None,
-    as_of: datetime | None = None,
-) -> list[QuotesRun]:
-    """Return the chronological history for a run identity.
-
-    If no filters are supplied, the full run storage is returned in append order.
-    """
-    return core.RUN_HISTORY.get_history(
-        provider=provider,
-        underlying=underlying,
-        currency=currency,
-        instrument=instrument,
-        as_of=as_of,
-    )
-
-
-def get_actual_runs(as_of: datetime | None = None) -> list[QuotesRun]:
-    """Return the latest run for each identity that is active as of the supplied time."""
-    return core.RUN_HISTORY.get_actual_runs(as_of=as_of)
-
-
 def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
     """Group the actual runs by instrument, currency, and underlying and join them.
 
-    Each provider's latest active run (see :meth:`RunHistoryStore.get_actual_runs`)
-    is bucketed by its ``(instrument, currency, underlying)`` identity, ignoring
-    ``provider``. Each bucket becomes a single :class:`QuotesRun` combining every
-    provider quoting that identity: for each tenor, the best bid is the highest
-    bid across the joined providers and the worst bid is the lowest; the
+    Each provider's latest active run (see :func:`data.get_actual_runs`) is
+    bucketed by its ``(instrument, currency, underlying)`` identity, ignoring
+    ``provider``. Each bucket becomes a single :class:`core.QuotesRun` combining
+    every provider quoting that identity: for each tenor, the best bid is the
+    highest bid across the joined providers and the worst bid is the lowest; the
     best offer is the lowest offer and the worst offer is the highest. Provider
     labels are rewritten to whoever actually quoted the selected level, and
     ``mid``/spreads are recalculated from the best bid and best offer by
-    :meth:`QuotesRun.to_frame`. Each resulting joint run is registered in
-    :data:`RUN_HISTORY` under the ``"joint"`` provider, same as a parsed run.
+    :func:`run_to_frame`.
     """
     groups: dict[tuple[str | None, str | None, str | None], list[QuotesRun]] = {}
     for run in actual_runs:
@@ -716,7 +403,6 @@ def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
 
     joint_runs = []
     for (instrument, currency, underlying), runs in groups.items():
-        #providers = sorted({run.provider for run in runs if run.provider is not None})
         joint_run = QuotesRun(
             currency=currency,
             run_name=runs[0].run_name,
@@ -757,11 +443,6 @@ def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
     return joint_runs
 
 
-def clear_run_storage() -> None:
-    """Delete all stored runs and quotes from the SQLite-backed history."""
-    core.RUN_HISTORY.clear()
-
-
 def parse_multiple_runs(run_text: str, provider: str | None = None) -> list[QuotesRun]:
     """Parse a text blob containing multiple swap runs from a single provider.
 
@@ -786,14 +467,14 @@ def parse_multiple_runs(run_text: str, provider: str | None = None) -> list[Quot
 
 
 def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
-    """Parse a single swap-run text block into a structured :class:`SwapRun`.
+    """Parse a single swap-run text block into a structured :class:`core.QuotesRun`.
 
     Args:
         run_text: Raw multi-line swap-run text starting with a header line.
         provider: Optional provider label attached to the parsed run.
 
     Returns:
-        A fully-populated :class:`SwapRun` object.
+        A fully-populated :class:`core.QuotesRun` object.
     """
     lines = [line.strip() for line in run_text.strip().splitlines() if line.strip()]
     if len(lines) < 2:

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
+import threading
 from pathlib import Path
-from typing import Any
 
 
 # ------------------------------------
@@ -129,11 +130,6 @@ QUOTE_RE = re.compile(
 )
 
 # ------------------------------------
-# Run history singleton slot, initialized by rates_parser
-# ------------------------------------
-RUN_HISTORY: Any = None
-
-# ------------------------------------
 # Provider options shown in the Streamlit parser dialog
 # ------------------------------------
 POSSIBLE_RUN_PROVIDERS = ["SBER", "VTB", "NRB", "AKB"]
@@ -142,3 +138,97 @@ POSSIBLE_RUN_PROVIDERS = ["SBER", "VTB", "NRB", "AKB"]
 # Joint-run spread thresholds by instrument, in basis points
 # ------------------------------------
 TIGHT_SPREAD_THRESHOLDS_BP = {"OIS": 12, "KRS": 12, "XCCY": 60}
+
+
+# ------------------------------------
+# Domain model classes
+# ------------------------------------
+class QuotesRun:
+    """Parsed representation of an interest-rate swap run.
+
+    This class is intentionally a plain data holder: parsing logic lives in
+    :mod:`parsing` (see :func:`parsing.parse_swap_run`), persistence lives in
+    :mod:`data` (see :class:`data.RunHistoryStore`), and presentation helpers
+    such as :func:`parsing.run_to_frame` and :func:`parsing.format_run`
+    operate on instances of this class rather than being methods on it.
+
+    Attributes:
+        currency: three-letter currency code, e.g. ``RUB``.
+        run_name: full header text without ``Bid``/``Offer`` words.
+        instrument: swap family, e.g. ``OIS``, ``KRS``, ``XCCY`` or ``CCIRS``.
+        underlying: swap reference curve(s), e.g. ``RUONIA`` or ``RUONIA/SOFR``.
+        quotes: mapping from tenor such as ``3M`` to ``{"best_bid": ..., "best_offer": ...}``.
+        size: quantity printed in the run footer, e.g. ``1k``.
+        size_type: the sizing descriptor printed next to the quantity, e.g. ``DV``.
+        size_currency: the currency descriptor printed next to the quantity, e.g. ``USD``.
+    """
+
+    def __init__(
+        self,
+        currency: str,
+        run_name: str,
+        instrument: str | None = None,
+        underlying: str | None = None,
+        provider: str | None = None,
+        header_tokens: list[str] | None = None,
+        unrecognized_tokens: list[str] | None = None,
+        quotes: dict[str, dict[str, float]] | None = None,
+        size: str | None = None,
+        size_type: str | None = None,
+        size_currency: str | None = None,
+        size_value: float | None = None,
+        size_unit: str | None = None,
+        start_fx_rate: float | None = None,
+        id: int | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        self.currency = currency
+        self.run_name = run_name
+        self.instrument = instrument
+        self.underlying = underlying
+        self.provider = provider
+        self.header_tokens = header_tokens or []
+        self.unrecognized_tokens = unrecognized_tokens or []
+        self.quotes = quotes or {}
+        self.size = size
+        self.size_type = size_type
+        self.size_currency = size_currency
+        self.size_value = size_value
+        self.size_unit = size_unit
+        self.start_fx_rate = start_fx_rate
+        self.id = id
+        self.created_at = created_at
+
+    def __repr__(self) -> str:
+        """Return a compact, unambiguous representation for debugging/logging."""
+        return (
+            f"QuotesRun(id={self.id!r}, provider={self.provider!r}, instrument={self.instrument!r}, "
+            f"currency={self.currency!r}, underlying={self.underlying!r})"
+        )
+
+
+class RunHistoryStore:
+    """Holds the connection state for a SQLite-backed run history.
+
+    Like :class:`QuotesRun`, this class is a plain state holder: a target
+    database path plus the bookkeeping needed to hand each thread its own
+    connection (Streamlit reruns each session's script in its own worker
+    thread, and sqlite3 connections are bound to the thread that created
+    them). Schema setup and every read/write are implemented as functions in
+    :mod:`data` that operate on instances of this class (e.g.
+    :func:`data.add_run`, :func:`data.get_history`) rather than as methods.
+    Any future class needing database access should follow the same split.
+    """
+
+    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
+        self.db_path = str(db_path)
+        self._local = threading.local()
+        self._all_conns: list[sqlite3.Connection] = []
+        self._conns_lock = threading.Lock()
+
+
+# ------------------------------------
+# Shared run-history singleton. Its schema is created by data._init_schema
+# when data.py is first imported, since that requires a connection.
+# ------------------------------------
+RUN_HISTORY: RunHistoryStore = RunHistoryStore()

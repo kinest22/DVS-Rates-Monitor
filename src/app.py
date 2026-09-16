@@ -1,7 +1,9 @@
 import pandas as pd
 import streamlit as st
 import core
-from parsing import QuotesRun, parse_multiple_runs, create_joint_runs, register_run
+from core import QuotesRun
+from parsing import parse_multiple_runs, create_joint_runs, run_to_frame
+from data import register_run, get_actual_runs
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
@@ -33,7 +35,7 @@ def _style_run_frame(run_df: pd.DataFrame) -> tuple[Styler, dict]:
 
     Applies, in one place:
       1) bp-scaled bid/offer changes (values are already bp-scaled by
-         :meth:`QuotesRun.to_frame`; here they're rendered as text)
+         :func:`parsing.run_to_frame`; here they're rendered as text)
       2) arrow + color coding on the change columns (red = growth, green = decrease)
       3) bold tenor labels
       4) compact 2-decimal bid/offer formatting, avoiding trailing-zero float noise
@@ -197,7 +199,7 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
     runs_num = len(runs)
     cols = st.columns(runs_num)
     for i, run in enumerate(runs):
-        run_df = run.to_frame(with_changes=True)
+        run_df = run_to_frame(run, with_changes=True)
         if mode == 'joint':
             styled_run_df, run_column_config = _style_joint_run_frame(run_df, run.instrument)
         else:
@@ -268,7 +270,7 @@ for toast_message in st.session_state.pop('load_toasts', []):
 # =====================================================================================
 st.divider()
 # fetching runs
-runs = core.RUN_HISTORY.get_actual_runs(as_of=datetime.now())
+runs = get_actual_runs(as_of=datetime.now())
 
 
 
