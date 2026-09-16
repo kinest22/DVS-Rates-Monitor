@@ -1,15 +1,10 @@
 import pandas as pd
 import streamlit as st
-from rates_parser import QuotesRun, RUN_HISTORY, parse_multiple_runs, create_joint_runs, register_run
+import core
+from rates_parser import QuotesRun, parse_multiple_runs, create_joint_runs, register_run
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
-
-
-
-POSSIBLE_RUN_PROVIDERS = ['SBER', 'VTB', 'NRB', 'AKB']
-TIGHT_SPREAD_THRESHOLDS_BP = {"OIS": 12, "KRS": 12, "XCCY": 60}
-
 
 
 
@@ -88,7 +83,7 @@ def _style_joint_run_frame(
 
     frame = run_df[['tenor', 'best_bid_provider', 'best_bid', 'mid', 'best_offer', 'best_offer_provider', 'best_bid_offer_spread']].copy()
 
-    tight_spread_threshold = TIGHT_SPREAD_THRESHOLDS_BP.get(instrument)
+    tight_spread_threshold = core.TIGHT_SPREAD_THRESHOLDS_BP.get(instrument)
 
     def _highlight_tight_spread(row: pd.Series) -> list[str]:
         if tight_spread_threshold is None or row['best_bid_offer_spread'] >= tight_spread_threshold:
@@ -117,7 +112,7 @@ def _style_joint_run_frame(
 def _narrow_spread_rows(run_df: pd.DataFrame, instrument: str | None) -> pd.DataFrame:
     """Return the joint-run rows whose bid/offer spread is tight and crossed
     between two different providers (see :data:`TIGHT_SPREAD_THRESHOLDS_BP`)."""
-    threshold = TIGHT_SPREAD_THRESHOLDS_BP.get(instrument)
+    threshold = core.TIGHT_SPREAD_THRESHOLDS_BP.get(instrument)
     if threshold is None:
         return run_df.iloc[0:0]
     return run_df[
@@ -177,7 +172,7 @@ def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont
 @st.dialog('Parse new run(s)', width='medium')
 def PARSE_RUN_DIALOG() -> None:
     cols = st.columns(2, gap='large')
-    provider = cols[0].selectbox('Provider:', options=POSSIBLE_RUN_PROVIDERS)
+    provider = cols[0].selectbox('Provider:', options=core.POSSIBLE_RUN_PROVIDERS)
     run_str = cols[0].text_area('Run data:', placeholder='Paste run text here...', height=750)
     cont = st.container(horizontal=True, horizontal_alignment="distribute")
 
@@ -273,7 +268,7 @@ for toast_message in st.session_state.pop('load_toasts', []):
 # =====================================================================================
 st.divider()
 # fetching runs
-runs = RUN_HISTORY.get_actual_runs(as_of=datetime.now())
+runs = core.RUN_HISTORY.get_actual_runs(as_of=datetime.now())
 
 
 

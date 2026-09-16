@@ -17,95 +17,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import json
-import os
 import re
 import sqlite3
 import threading
 
 import pandas as pd
-
-
-DEFAULT_DB_PATH = os.environ.get(
-    "RATES_MONITOR_DB_PATH",
-    str(Path(__file__).resolve().parent.parent / "data" / "runhist.db"),
-)
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider TEXT,
-    currency TEXT,
-    instrument TEXT,
-    underlying TEXT,
-    run_name TEXT,
-    header_tokens TEXT,
-    unrecognized_tokens TEXT,
-    size TEXT,
-    size_type TEXT,
-    size_currency TEXT,
-    size_value REAL,
-    size_unit TEXT,
-    start_fx_rate REAL,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_runs_identity
-    ON runs (provider, underlying, currency, instrument, created_at);
-
-CREATE TABLE IF NOT EXISTS quotes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
-    tenor TEXT NOT NULL,
-    worst_bid_provider TEXT,
-    worst_bid REAL,
-    best_bid_provider TEXT,
-    best_bid REAL NOT NULL,
-    mid REAL NOT NULL,
-    best_offer REAL NOT NULL,
-    best_offer_provider TEXT,
-    worst_offer REAL,
-    worst_offer_provider TEXT,
-    end_date TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_quotes_run_id ON quotes (run_id);
-"""
-
-QUOTE_OPTIONAL_COLUMNS = (
-    "end_date",
-    "worst_bid",
-    "worst_bid_provider",
-    "best_bid_provider",
-    "best_offer_provider",
-    "worst_offer",
-    "worst_offer_provider",
-)
-
-
-CURRENCY_CODES = frozenset({"RUB", "USD", "CNY", "CNH", "EUR"})
-INSTRUMENT_TYPES = frozenset({"OIS", "KRS", "IRS", "XCCY", "CCIRS", "FXSWAP"})
-INDICATOR_CODES = frozenset({"RUONIA", "SOFR", "RUSFAR", "RUSFARON", "KEYRATE", "KEY RATE"})
-HEADER_IGNORE_TOKENS = frozenset({"RUN", "SWAP", "BID", "OFFER", "TERM", "END"})
-INSTRUMENT_DEFAULTS = {
-    "OIS": {"currency": "RUB", "underlying": "RUONIA/RUB", "size": "1k", "size_type": "dv", "size_currency": "USD"},
-    "KRS": {"currency": "RUB", "underlying": "KEYRATE/RUB", "size": "1k", "size_type": "dv", "size_currency": "USD"},
-    "XCCY": {"currency": "CNH", "underlying": "RUONIA/CNH", "size": "100mio", "size_type": "par", "size_currency": "CNH"},
-    "CCIRS": {"currency": "CNH", "underlying": "RUONIA/CNH", "size": "100mio", "size_type": "par", "size_currency": "CNH"},
-    "FXSWAP": {"currency": "CNH", "underlying": "CNH/RUB", "size": "100mio", "size_type": "par", "size_currency": "CNH"},
-}
-
-HEADER_RE = re.compile(
-    r"^(?P<currency>[A-Z]{3})\s+(?P<run_name>.+)$",
-    flags=re.IGNORECASE,
-)
-FOOTER_RE = re.compile(
-    r"^(?P<size_value>\d+(?:[.,]\d+)?)\s*(?P<size_unit>mio|mln|bio|bln|b|k|m)?\s*(?P<size_currency>RUB|USD|CNY|CNH|EUR)?\s*(?P<size_type>DV|PAR|DV-CENTRIC|PAR-CENTRIC)?(?:\s*,?\s*(?P<tail>.*))?$",
-    flags=re.IGNORECASE,
-)
-QUOTE_RE = re.compile(
-    r"^(?P<tenor>[0-9]+[A-Za-z]+)\s+(?P<bid>\d+(?:[.,]\d+)?)\s*(?:/|\s+)\s*(?P<offer>\d+(?:[.,]\d+)?)\s*(?P<end_date>(?:\d{2}[./]\d{2}[./]\d{4}))?$",
-    flags=re.IGNORECASE,
-)
+import core
 
 HistoryKey = tuple[str | None, str | None, str | None, str | None]
 
@@ -113,7 +30,7 @@ HistoryKey = tuple[str | None, str | None, str | None, str | None]
 class RunHistoryStore:
     """Persist parsed runs in SQLite and expose latest active runs by identity."""
 
-    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
+    def __init__(self, db_path: str | Path = core.DEFAULT_DB_PATH) -> None:
         self.db_path = str(db_path)
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -121,7 +38,7 @@ class RunHistoryStore:
         self._all_conns: list[sqlite3.Connection] = []
         self._conns_lock = threading.Lock()
         with self._conn:
-            self._conn.executescript(SCHEMA_SQL)
+            self._conn.executescript(core.SCHEMA_SQL)
 
     def _new_connection(self) -> sqlite3.Connection:
         """Open a fresh connection for the calling thread.
@@ -233,7 +150,7 @@ class RunHistoryStore:
         ).fetchall()
         for quote_row in quote_rows:
             payload: dict[str, Any] = {"best_bid": quote_row["best_bid"], "best_offer": quote_row["best_offer"]}
-            for column in QUOTE_OPTIONAL_COLUMNS:
+            for column in core.QUOTE_OPTIONAL_COLUMNS:
                 value = quote_row[column]
                 if value is not None:
                     payload[column] = value
@@ -328,7 +245,9 @@ class RunHistoryStore:
         self._local.conn = None
 
 
-RUN_HISTORY = RunHistoryStore()
+# Initialize the shared singleton after RunHistoryStore is declared here.
+core.RUN_HISTORY = RunHistoryStore()
+
 
 
 class QuotesRun:
@@ -439,7 +358,7 @@ class QuotesRun:
         frame = pd.DataFrame(rows)
 
         if with_changes and not frame.empty:
-            previous_run = RUN_HISTORY.get_previous_run(self)
+            previous_run = core.RUN_HISTORY.get_previous_run(self)
             bp_scale = 1.0 if is_fx_swap else 100.0
             if previous_run is not None:
                 previous_levels = previous_run.to_frame()[["tenor", "best_bid", "best_offer"]].rename(
@@ -623,20 +542,20 @@ def _tokenize_header(header_text: str) -> list[str]:
 
 def _is_indicator_token(token: str) -> bool:
     """Return True when the token represents a valid underlying indicator."""
-    if token in INDICATOR_CODES:
+    if token in core.INDICATOR_CODES:
         return True
-    valid_parts = INDICATOR_CODES | CURRENCY_CODES
+    valid_parts = core.INDICATOR_CODES | core.CURRENCY_CODES
     return "/" in token and all(part in valid_parts for part in token.split("/"))
 
 
 def _is_currency_token(token: str) -> bool:
     """Return True when the token is one of the supported currency codes."""
-    return token in CURRENCY_CODES
+    return token in core.CURRENCY_CODES
 
 
 def _is_instrument_token(token: str) -> bool:
     """Return True when the token is a known swap instrument family."""
-    return token in INSTRUMENT_TYPES
+    return token in core.INSTRUMENT_TYPES
 
 
 def _normalize_pair(lhs: str, rhs: str) -> str:
@@ -658,7 +577,7 @@ def _infer_header_metadata(header_tokens: list[str]) -> tuple[str | None, str | 
     unrecognized_tokens: list[str] = []
 
     for index, token in enumerate(header_tokens):
-        if token in HEADER_IGNORE_TOKENS:
+        if token in core.HEADER_IGNORE_TOKENS:
             unrecognized_tokens.append(token)
             continue
 
@@ -710,7 +629,7 @@ def _infer_header_metadata(header_tokens: list[str]) -> tuple[str | None, str | 
 
         if instrument_type == "XCCY" and underlying_indicator is not None and "/" in underlying_indicator:
             lhs, rhs = underlying_indicator.split("/", 1)
-            if lhs in CURRENCY_CODES and rhs in INDICATOR_CODES:
+            if lhs in core.CURRENCY_CODES and rhs in core.INDICATOR_CODES:
                 underlying_indicator = _normalize_pair(rhs, lhs)
 
         if instrument_type == "KRS" and underlying_indicator is None:
@@ -728,22 +647,22 @@ def _infer_header_metadata(header_tokens: list[str]) -> tuple[str | None, str | 
 
 def _is_run_header_line(line: str) -> bool:
     """Return True when a line appears to begin a new swap run block."""
-    if HEADER_RE.match(line):
+    if core.HEADER_RE.match(line):
         return True
 
     parts = line.split()
     if len(parts) < 2:
-        return parts[0].upper() in INSTRUMENT_TYPES
+        return parts[0].upper() in core.INSTRUMENT_TYPES
 
     # Headers may lead with a currency (``RUB KRS run``) or, for cross-currency
     # instruments, with the instrument family instead (``XCCY CNH/RUONIA run``).
     leading_token = parts[0].upper()
-    return leading_token in CURRENCY_CODES or leading_token in INSTRUMENT_TYPES
+    return leading_token in core.CURRENCY_CODES or leading_token in core.INSTRUMENT_TYPES
 
 
 def _register_run(run: "QuotesRun") -> None:
     """Store a parsed run globally and attach it to its identity-based history."""
-    RUN_HISTORY.add(run)
+    core.RUN_HISTORY.add(run)
 
 
 def register_run(run: "QuotesRun") -> None:
@@ -762,7 +681,7 @@ def get_run_history(
 
     If no filters are supplied, the full run storage is returned in append order.
     """
-    return RUN_HISTORY.get_history(
+    return core.RUN_HISTORY.get_history(
         provider=provider,
         underlying=underlying,
         currency=currency,
@@ -773,7 +692,7 @@ def get_run_history(
 
 def get_actual_runs(as_of: datetime | None = None) -> list[QuotesRun]:
     """Return the latest run for each identity that is active as of the supplied time."""
-    return RUN_HISTORY.get_actual_runs(as_of=as_of)
+    return core.RUN_HISTORY.get_actual_runs(as_of=as_of)
 
 
 def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
@@ -840,7 +759,7 @@ def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
 
 def clear_run_storage() -> None:
     """Delete all stored runs and quotes from the SQLite-backed history."""
-    RUN_HISTORY.clear()
+    core.RUN_HISTORY.clear()
 
 
 def parse_multiple_runs(run_text: str, provider: str | None = None) -> list[QuotesRun]:
@@ -882,14 +801,14 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
 
     # The first non-empty line must contain the currency and run header.
     header_line = lines[0]
-    header_match = HEADER_RE.match(header_line)
+    header_match = core.HEADER_RE.match(header_line)
     if header_match is None:
         full_header = header_line
         parts = full_header.split()
         if len(parts) < 2 and not _is_instrument_token(parts[0].upper()):
             raise ValueError(f"Could not parse swap run header: {header_line!r}")
         currency = "RUB"
-        if parts[0] in CURRENCY_CODES:
+        if parts[0] in core.CURRENCY_CODES:
             currency = parts[0]
         run_name = full_header
     else:
@@ -901,7 +820,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
     header_tokens = _tokenize_header(full_header)
     parsed_currency, instrument_type, underlying_indicator, recognized_tokens, unrecognized_tokens = _infer_header_metadata(header_tokens)
 
-    defaults = INSTRUMENT_DEFAULTS.get(instrument_type or "")
+    defaults = core.INSTRUMENT_DEFAULTS.get(instrument_type or "")
     explicit_currency = None
     explicit_underlying_token = next(
         (token for token in header_tokens if _is_indicator_token(token)), None
@@ -965,8 +884,8 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
     body_lines = lines[1:]
     if body_lines:
         last_line = body_lines[-1]
-        footer_match = FOOTER_RE.match(last_line)
-        if footer_match is not None and QUOTE_RE.match(last_line) is None:
+        footer_match = core.FOOTER_RE.match(last_line)
+        if footer_match is not None and core.QUOTE_RE.match(last_line) is None:
             normalized_size, numeric_size, canonical_unit = _normalize_size(
                 footer_match.group("size_value"),
                 footer_match.group("size_unit"),
@@ -993,7 +912,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
         lower = raw_line.lower()
         if lower in {"term bid offer", "bid offer", "term / bid / offer"}:
             continue
-        quote_match = QUOTE_RE.match(raw_line)
+        quote_match = core.QUOTE_RE.match(raw_line)
         if quote_match is None:
             continue
 
