@@ -6,7 +6,12 @@ import os
 import re
 import sqlite3
 import threading
+import pandas as pd
+
 from pathlib import Path
+from enum import Enum
+from datetime import date
+from daycounts import actual_actual_isda
 
 
 # ------------------------------------
@@ -232,3 +237,35 @@ class RunHistoryStore:
 # when data.py is first imported, since that requires a connection.
 # ------------------------------------
 RUN_HISTORY: RunHistoryStore = RunHistoryStore()
+
+
+class RateType(Enum):
+    PAR     = 0
+    FWD     = 1
+    ZERO    = 2
+
+
+class Curve:
+    def __init__(self, curve_data: pd.DataFrame, curve_date: date, curve_type: RateType) -> None:
+        value_date = curve_date + 1
+        self.__curve_data: pd.DataFrame = None
+        self.CurveType: RateType = None
+
+    def _set_curve_terms(self, curve_data: pd.DataFrame, value_date: date) -> None:
+        end_date_finder = lambda t: self._add_period(value_date, t)
+        curve_data['Start'] = value_date
+        curve_data['End'] = curve_data['Tenor'].apply(end_date_finder)
+        curve_data['Term'] = actual_actual_isda(curve_data['Start'], curve_data['End'])
+        curve_data['DF'] = 1
+        
+
+    def _add_period(value_date: date, period: str) -> date:
+        period = period.strip().upper()
+        unit = period[-1]
+        value = int(period[:-1])
+
+        match unit:
+            case 'W': return value_date + pd.DateOffset(weeks=value)
+            case 'M': return value_date + pd.DateOffset(months=value)
+            case 'Y': return value_date + pd.DateOffset(years=value)
+            case _  : raise ValueError(f"Unknown period: '{period}'")
