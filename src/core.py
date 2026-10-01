@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS runs (
     size_value REAL,
     size_unit TEXT,
     start_fx_rate REAL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    mode_override TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_identity
@@ -186,6 +187,7 @@ class QuotesRun:
         start_fx_rate: float | None = None,
         id: int | None = None,
         created_at: str | None = None,
+        mode_override: str | None = None,
     ) -> None:
         self.currency = currency
         self.run_name = run_name
@@ -203,6 +205,7 @@ class QuotesRun:
         self.start_fx_rate = start_fx_rate
         self.id = id
         self.created_at = created_at
+        self.mode_override = mode_override
 
     def __repr__(self) -> str:
         """Return a compact, unambiguous representation for debugging/logging."""

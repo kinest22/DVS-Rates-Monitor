@@ -3,7 +3,7 @@ import streamlit as st
 import core
 from core import QuotesRun
 from parsing import parse_multiple_runs, create_joint_runs, run_to_frame
-from data import register_run, get_actual_runs
+from data import register_run, get_actual_runs, set_run_mode_override
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
@@ -30,6 +30,19 @@ def _section_caption(text: str) -> None:
         f"opacity:0.6; margin:0 0 0.25rem 0'>{text}</p><hr style='margin:0 0 1rem 0'>",
         unsafe_allow_html=True,
     )
+
+
+def _default_run_mode(run: QuotesRun) -> str:
+    """FIRM for a run created today; VIA FRESH once the calendar day it was
+    parsed on has passed (stale quotes shouldn't default back into joint runs)."""
+    run_date = datetime.strptime(run.created_at, "%Y-%m-%d %H:%M:%S.%f").date()
+    return 'FIRM' if run_date == datetime.now().date() else 'VIA FRESH'
+
+
+def _effective_run_mode(run: QuotesRun) -> str:
+    """The FIRM/VIA FRESH state to show for a run: an explicit, persisted
+    override if one was set, otherwise the date-based default."""
+    return run.mode_override or _default_run_mode(run)
 
 
 def _color_change_text(text: str) -> str:
@@ -204,14 +217,17 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
                 **UNDERLYING**: {run.underlying}  
                 **SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.size_currency}  
                 **TIME**: {time}''')
-                st.segmented_control(
+                default_mode = _effective_run_mode(run)
+                selected_mode = st.segmented_control(
                     None,
                     options=['FIRM', 'VIA FRESH'],
-                    default='FIRM',
+                    default=default_mode,
                     key=f'run_mode_{run.id}',
                     width='stretch',
                     label_visibility='collapsed'
                 )
+                if selected_mode != default_mode:
+                    set_run_mode_override(run.id, selected_mode)
             else:
                 st.markdown(f'''
                 **JOINT RUN**  

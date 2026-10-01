@@ -56,10 +56,14 @@ def _conn(store: core.RunHistoryStore) -> sqlite3.Connection:
 
 
 def _init_schema(store: core.RunHistoryStore) -> None:
-    """Create the ``runs``/``quotes`` tables on ``store`` if they don't exist yet."""
+    """Create the ``runs``/``quotes`` tables on ``store`` if they don't exist yet,
+    and migrate any pre-existing ``runs`` table that predates a given column."""
     conn = _conn(store)
     with conn:
         conn.executescript(core.SCHEMA_SQL)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        if "mode_override" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN mode_override TEXT")
 
 
 def _row_to_run(store: core.RunHistoryStore, row: sqlite3.Row) -> "core.QuotesRun":
@@ -80,6 +84,7 @@ def _row_to_run(store: core.RunHistoryStore, row: sqlite3.Row) -> "core.QuotesRu
         start_fx_rate=row["start_fx_rate"],
         id=row["id"],
         created_at=row["created_at"],
+        mode_override=row["mode_override"],
     )
     quote_rows = _conn(store).execute(
         "SELECT * FROM quotes WHERE run_id = ? ORDER BY id", (row["id"],)
@@ -104,8 +109,9 @@ def _add_run(store: core.RunHistoryStore, run: "core.QuotesRun", timestamp: date
             INSERT INTO runs (
                 provider, currency, instrument, underlying, run_name,
                 header_tokens, unrecognized_tokens, size, size_type,
-                size_currency, size_value, size_unit, start_fx_rate, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                size_currency, size_value, size_unit, start_fx_rate, created_at,
+                mode_override
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.provider,
@@ -122,6 +128,7 @@ def _add_run(store: core.RunHistoryStore, run: "core.QuotesRun", timestamp: date
                 run.size_unit,
                 run.start_fx_rate,
                 stamp.isoformat(sep=" "),
+                None,
             ),
         )
         run_id = cursor.lastrowid
@@ -231,6 +238,13 @@ def _get_actual_runs(store: core.RunHistoryStore, as_of: datetime | None = None)
     return [_row_to_run(store, row) for row in ordered_rows]
 
 
+def _set_run_mode_override(store: core.RunHistoryStore, run_id: int, mode: str | None) -> None:
+    """Persist an explicit FIRM/VIA FRESH override on a run row."""
+    conn = _conn(store)
+    with conn:
+        conn.execute("UPDATE runs SET mode_override = ? WHERE id = ?", (mode, run_id))
+
+
 def _clear(store: core.RunHistoryStore) -> None:
     """Delete all stored runs and quotes from ``store``."""
     conn = _conn(store)
@@ -255,6 +269,13 @@ _init_schema(core.RUN_HISTORY)
 def register_run(run: "core.QuotesRun") -> None:
     """Persist a previously parsed run in the run history."""
     _add_run(core.RUN_HISTORY, run)
+
+
+def set_run_mode_override(run_id: int, mode: str | None) -> None:
+    """Persist an explicit FIRM/VIA FRESH choice for a run, so it survives page
+    reloads. A fresh parse of the same identity starts a new row with no
+    override, which is what clears it back to the date-based default."""
+    _set_run_mode_override(core.RUN_HISTORY, run_id, mode)
 
 
 def get_run_history(
