@@ -21,6 +21,17 @@ def _format_change_bp(value: float) -> str:
     return f"→ {value:.0f}"
 
 
+def _section_caption(text: str) -> None:
+    """Render a caption-style label immediately above a divider, as a single
+    markdown element -- st.caption() + st.divider() are separate widgets and
+    pick up Streamlit's normal ~1rem inter-widget gap between them."""
+    st.markdown(
+        f"<p style='font-size:1.1rem; color:var(--text-color); "
+        f"opacity:0.6; margin:0 0 0.25rem 0'>{text}</p><hr style='margin:0 0 1rem 0'>",
+        unsafe_allow_html=True,
+    )
+
+
 def _color_change_text(text: str) -> str:
     """Color an arrow-formatted change string: red for growth, green for decrease."""
     if text.startswith("▲"):
@@ -61,9 +72,6 @@ def _style_run_frame(run_df: pd.DataFrame) -> tuple[Styler, dict]:
         'best_offer_change_bp': st.column_config.TextColumn("Δ bp", alignment='center'),
     }
     return styled_frame, column_config
-
-
-
 
 
 def _style_joint_run_frame(
@@ -123,34 +131,22 @@ def _narrow_spread_rows(run_df: pd.DataFrame, instrument: str | None) -> pd.Data
     ]
 
 
-def _display_narrow_spread_blocks(run_df: pd.DataFrame, instrument: str | None) -> None:
-    """Below a joint run, write one block per provider showing the opposite
-    side's best bid/offer for that provider's tight-spread tenors, plus a
-    final anonymous market block with no providers noticed."""
-    narrow_rows = _narrow_spread_rows(run_df, instrument)
-    if narrow_rows.empty:
-        return
-
-    providers = sorted(set(narrow_rows['best_bid_provider']) | set(narrow_rows['best_offer_provider']))
-    for provider in providers:
-        lines = []
-        for _, row in narrow_rows.iterrows():
-            tenor, bid, offer = row['tenor'], row['best_bid'], row['best_offer']
-            if row['best_bid_provider'] == provider:
-                lines.append(f"{instrument} {tenor} /{offer:.2f}")
-            elif row['best_offer_provider'] == provider:
-                lines.append(f"{instrument} {tenor} {bid:.2f}/")
-            else:
-                lines.append(f"{instrument} {tenor} {bid:.2f}/{offer:.2f}")
-        st.write(f"**For {provider}:**  \n" + "  \n".join(lines))
-
-    market_lines = [
-        f"{instrument} {row['tenor']} {row['best_bid']:.2f} / {row['best_offer']:.2f}"
-        for _, row in narrow_rows.iterrows()
-    ]
-    st.write("**MARKET:**  \n" + "  \n".join(market_lines))
-
-
+def _collect_narrow_quotes(joint_runs: list[QuotesRun]) -> pd.DataFrame:
+    """Gather tight-spread, crossed-provider rows across all joint runs,
+    tagging each row with its instrument so they can be grouped by provider
+    regardless of which instrument they came from."""
+    frames = []
+    for run in joint_runs:
+        run_df = run_to_frame(run, with_changes=True)
+        narrow_rows = _narrow_spread_rows(run_df, run.instrument)
+        if narrow_rows.empty:
+            continue
+        narrow_rows = narrow_rows.copy()
+        narrow_rows['instrument'] = run.instrument
+        frames.append(narrow_rows)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont: DeltaGenerator) -> None:
@@ -167,8 +163,6 @@ def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont
             f"**SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.size_currency}  \n"
         )
         col.space()
-
-
 
 
 @st.dialog('Parse new run(s)', width='medium')
@@ -190,9 +184,6 @@ def PARSE_RUN_DIALOG() -> None:
                 st.session_state.setdefault('load_toasts', []).append(f"{run.instrument} run from {run.provider} loaded.")
             del st.session_state['parsed_runs']
             st.rerun()
-
-
-
 
 
 def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
@@ -227,8 +218,37 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
                 **INSTRUMENT**: {run.instrument}  
                 **UNDERLYING**: {run.underlying}''')
             st.dataframe(styled_run_df, hide_index=True, column_config=run_column_config, height='content')
-            if mode == 'joint':
-                _display_narrow_spread_blocks(run_df, run.instrument)
+
+
+def DISPLAY_TIGHT_QUOTES(joint_runs: list[QuotesRun]) -> None:
+    """Standalone block, separated from the joint runs above, showing narrow
+    (tight-spread, crossed) quotes grouped by provider -- not by instrument.
+    Each provider gets its own column, spanning all their instruments (OIS,
+    KRS, XCCY, ...), plus a final anonymous MARKET column."""
+    narrow_rows = _collect_narrow_quotes(joint_runs)
+    if narrow_rows.empty:
+        return
+
+    providers = sorted(set(narrow_rows['best_bid_provider']) | set(narrow_rows['best_offer_provider']))
+    cols = st.columns(len(providers) + 1)
+
+    for col, provider in zip(cols, providers):
+        lines = []
+        for _, row in narrow_rows.iterrows():
+            instrument, tenor, bid, offer = row['instrument'], row['tenor'], row['best_bid'], row['best_offer']
+            if row['best_bid_provider'] == provider:
+                lines.append(f"{instrument} {tenor} /{offer:.2f}")
+            elif row['best_offer_provider'] == provider:
+                lines.append(f"{instrument} {tenor} {bid:.2f}/")
+            else:
+                lines.append(f"{instrument} {tenor} {bid:.2f}/{offer:.2f}")
+        col.write(f"**{provider}**  \n" + "  \n".join(lines))
+
+    market_lines = [
+        f"{row['instrument']} {row['tenor']} {row['best_bid']:.2f} / {row['best_offer']:.2f}"
+        for _, row in narrow_rows.iterrows()
+    ]
+    cols[-1].write("**MARKET**  \n" + "  \n".join(market_lines))
 
 
 
@@ -237,9 +257,6 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
 # =====================================================================================
 st.set_page_config(page_title="Rates Monitor", layout="wide")
 st.bottom.caption("© 2026 DVS Brokers · All rights reserved", text_alignment='center')
-
-
-
 
 
 
@@ -253,50 +270,34 @@ if st.button("PARSE NEW RUN"):
 
 
 # =====================================================================================
-# notifications block
+# toast notifications block
 # =====================================================================================
 for toast_message in st.session_state.pop('load_toasts', []):
     st.toast(toast_message, icon=":material/table_convert:")
 
 
 
-
-
-
-
-
 # =====================================================================================
 # actual runs block
 # =====================================================================================
-st.divider()
-# fetching runs
-runs = get_actual_runs(as_of=datetime.now())
-
-
-
-# warning if no runs
-if not runs:
+_section_caption('Participant runs')
+runs = get_actual_runs(as_of=datetime.now())                            # fetching runs
+if not runs:                                                            # warning if no runs
     st.info("There are no actual runs at the moment.  \n" \
     "Please use <PARSE NEW RUN> button above to add new run(s).")
     st.stop()
-
-
-
-# display runs
-DISPLAY_RUNS(runs, 'normal')
-
-
+DISPLAY_RUNS(runs, 'normal')                                            # display runs
 
 
 
 # =====================================================================================
 # joint runs block
 # =====================================================================================
-st.divider()
-firm_runs = [
-    run for run in runs
-    if st.session_state.get(f'run_mode_{run.id}', 'FIRM') == 'FIRM'
-]
+_section_caption('Joint runs')
+firm_runs = []
+for run in runs:
+    if st.session_state.get(f'run_mode_{run.id}', 'FIRM') == 'FIRM':
+        firm_runs.append(run)
 joint_runs = create_joint_runs(firm_runs)
 if joint_runs:
     DISPLAY_RUNS(joint_runs, 'joint')
@@ -305,7 +306,10 @@ else:
 
 
 
-
-
-
+# =====================================================================================
+# tight quotes block
+# =====================================================================================
+if joint_runs:
+    _section_caption('Tight quotes')
+    DISPLAY_TIGHT_QUOTES(joint_runs)
 
