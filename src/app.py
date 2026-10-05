@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 import core
-from core import QuotesRun
+from core import QuotesRun, DIRECT_QUOTE_INSTRUMENTS, DIRECT_QUOTE_ROWS
 from parsing import parse_multiple_runs, create_joint_runs, run_to_frame
 from data import register_run, get_actual_runs, set_run_mode_override
 from datetime import datetime
@@ -162,6 +162,77 @@ def _collect_narrow_quotes(joint_runs: list[QuotesRun]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def _empty_direct_quotes_frame() -> pd.DataFrame:
+    """Build a blank direct-quotes grid: one row per manually entered quote,
+    with separate bid/offer sides (each carrying its own provider and size).
+
+    This frame only ever seeds the editor on its very first render -- once a
+    key is attached (see :func:`_direct_quotes_editor`), Streamlit keeps the
+    user's edits in session state and ignores this initial value afterwards.
+    """
+    return pd.DataFrame({
+        'bid_provider':     ['']            * DIRECT_QUOTE_ROWS,
+        'bid_size':         ['']            * DIRECT_QUOTE_ROWS,
+        'bid':              [float('nan')]  * DIRECT_QUOTE_ROWS,
+        'tenor':            ['']            * DIRECT_QUOTE_ROWS,
+        'offer':            [float('nan')]  * DIRECT_QUOTE_ROWS,
+        'offer_size':       ['']            * DIRECT_QUOTE_ROWS,
+        'offer_provider':   ['']            * DIRECT_QUOTE_ROWS,
+    })
+
+
+def merge_direct_quotes(joint_runs: list[QuotesRun], direct_quotes: dict[str, pd.DataFrame]) -> list[QuotesRun]:
+    """Fold manually entered direct quotes into the joint run for the same
+    instrument, so a good direct bid/offer can win a tenor (or fill one in,
+    if no participant run quotes it at all) alongside the parsed runs.
+
+    A direct quote only ever replaces one side of a tenor if it's better than
+    what's already there (higher bid / lower offer); a brand-new tenor is only
+    added once both sides are known, since the rest of the app assumes every
+    quoted tenor has both a bid and an offer.
+    """
+    joint_runs_by_instrument = {run.instrument: run for run in joint_runs}
+
+    for instrument, quotes_df in direct_quotes.items():
+        for _, row in quotes_df.iterrows():
+            tenor = str(row['tenor'] or '').strip().upper()
+            if not tenor:
+                continue  # blank row -- nothing entered yet
+
+            joint_run = joint_runs_by_instrument.get(instrument)
+            if joint_run is None:
+                # No participant runs for this instrument at all -- start a
+                # joint run from scratch using the instrument's usual identity.
+                defaults = core.INSTRUMENT_DEFAULTS.get(instrument, {})
+                joint_run = QuotesRun(
+                    currency=defaults.get('currency'),
+                    run_name=f'{instrument} direct quotes',
+                    instrument=instrument,
+                    underlying=defaults.get('underlying'),
+                    provider='joint',
+                )
+                joint_runs_by_instrument[instrument] = joint_run
+
+            quote = joint_run.quotes.get(tenor, {})
+            best_bid = quote.get('best_bid')
+            best_offer = quote.get('best_offer')
+
+            if pd.notna(row['bid']) and (best_bid is None or row['bid'] > best_bid):
+                best_bid = float(row['bid'])
+                quote['best_bid'] = best_bid
+                quote['best_bid_provider'] = str(row['bid_provider'] or '').strip() or None
+
+            if pd.notna(row['offer']) and (best_offer is None or row['offer'] < best_offer):
+                best_offer = float(row['offer'])
+                quote['best_offer'] = best_offer
+                quote['best_offer_provider'] = str(row['offer_provider'] or '').strip() or None
+
+            if best_bid is not None and best_offer is not None:
+                joint_run.quotes[tenor] = quote
+
+    return list(joint_runs_by_instrument.values())
+
+
 def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont: DeltaGenerator) -> None:
     """Display parsed runs in the right-hand column of the parse dialog."""
     col.space()
@@ -236,6 +307,31 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
             st.dataframe(styled_run_df, hide_index=True, column_config=run_column_config, height='content')
 
 
+def DIRECT_QUOTES_EDITOR(instrument: str) -> pd.DataFrame:
+    """Render one instrument's editable direct-quotes grid and return its
+    current contents (including whatever the user has typed so far).
+
+    Not persisted anywhere -- it only lives in Streamlit's widget state for
+    this browser session, per the current "no database for these yet" design.
+    """
+    return st.data_editor(
+        _empty_direct_quotes_frame(),
+        key=f'direct_quotes_{instrument}',
+        hide_index=True,
+        num_rows='fixed',
+        width='stretch',
+        column_config={
+            'bid_provider': st.column_config.TextColumn('Provider', width='small'),
+            'bid_size': st.column_config.TextColumn('Size', width='small'),
+            'bid': st.column_config.NumberColumn('Bid', format='%.2f'),
+            'tenor': st.column_config.TextColumn('Tenor', width='small'),
+            'offer': st.column_config.NumberColumn('Offer', format='%.2f'),
+            'offer_size': st.column_config.TextColumn('Size', width='small'),
+            'offer_provider': st.column_config.TextColumn('Provider', width='small'),
+        },
+    )
+
+
 def DISPLAY_TIGHT_QUOTES(joint_runs: list[QuotesRun]) -> None:
     """Standalone block, separated from the joint runs above, showing narrow
     (tight-spread, crossed) quotes grouped by provider -- not by instrument.
@@ -307,6 +403,21 @@ DISPLAY_RUNS(runs, 'normal')                                            # displa
 
 
 # =====================================================================================
+# direct quotes block -- manually typed bid/offer levels, not tied to a parsed
+# run and not persisted to the database; kept only in the browser session.
+# =====================================================================================
+_section_caption('Direct quotes')
+st.caption('Enter bid/offer levels you receive directly, outside of a parsed run. Filled-in rows feed into the joint runs below.')
+direct_quote_cols = st.columns(len(DIRECT_QUOTE_INSTRUMENTS))
+direct_quotes = {}
+for col, instrument in zip(direct_quote_cols, DIRECT_QUOTE_INSTRUMENTS):
+    with col:
+        st.markdown(f'**{instrument}**')
+        direct_quotes[instrument] = DIRECT_QUOTES_EDITOR(instrument)
+
+
+
+# =====================================================================================
 # joint runs block
 # =====================================================================================
 _section_caption('Joint runs')
@@ -315,6 +426,7 @@ for run in runs:
     if st.session_state.get(f'run_mode_{run.id}', 'FIRM') == 'FIRM':
         firm_runs.append(run)
 joint_runs = create_joint_runs(firm_runs)
+joint_runs = merge_direct_quotes(joint_runs, direct_quotes)
 if joint_runs:
     DISPLAY_RUNS(joint_runs, 'joint')
 else:
