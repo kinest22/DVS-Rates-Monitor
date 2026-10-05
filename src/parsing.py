@@ -25,6 +25,23 @@ import data
 from core import QuotesRun
 
 
+_TENOR_UNIT_DAYS = {"D": 1, "W": 7, "M": 30, "Y": 365}
+
+
+def tenor_sort_key(tenor: str) -> tuple[int, float, str]:
+    """Return a key ordering tenors by maturity (``1W < 2W < 1M < ... < 1Y < 10Y``).
+
+    Tenors that don't match ``<number><D|W|M|Y>`` sort after all recognized
+    ones, alphabetically.
+    """
+    match = re.fullmatch(r"(\d+)([A-Za-z]+)", str(tenor).strip())
+    if match is not None:
+        unit_days = _TENOR_UNIT_DAYS.get(match.group(2).upper())
+        if unit_days is not None:
+            return 0, int(match.group(1)) * unit_days, ""
+    return 1, 0.0, str(tenor)
+
+
 def run_to_frame(run: QuotesRun, with_changes: bool = False) -> pd.DataFrame:
     """Return a run's parsed quote matrix as a pandas DataFrame.
 
@@ -52,7 +69,7 @@ def run_to_frame(run: QuotesRun, with_changes: bool = False) -> pd.DataFrame:
     provider = run.provider
     is_fx_swap = run.instrument == "FXSWAP"
 
-    for tenor, quote in run.quotes.items():
+    for tenor, quote in sorted(run.quotes.items(), key=lambda item: tenor_sort_key(item[0])):
         best_bid = float(quote["best_bid"])
         best_offer = float(quote["best_offer"])
         worst_bid = float(quote.get("worst_bid", best_bid))
