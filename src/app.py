@@ -344,23 +344,30 @@ def DISPLAY_TIGHT_QUOTES(joint_runs: list[QuotesRun]) -> None:
     providers = sorted(set(narrow_rows['best_bid_provider']) | set(narrow_rows['best_offer_provider']))
     cols = st.columns(len(providers) + 1)
 
+    def join_by_instrument(lines: list[tuple[str, str]]) -> str:
+        # line breaks within an instrument class, an empty line between classes
+        groups: dict[str, list[str]] = {}
+        for instrument, line in lines:
+            groups.setdefault(instrument, []).append(line)
+        return "\n\n".join("  \n".join(group) for group in groups.values())
+
     for col, provider in zip(cols, providers):
         lines = []
         for _, row in narrow_rows.iterrows():
             instrument, tenor, bid, offer = row['instrument'], row['tenor'], row['best_bid'], row['best_offer']
             if row['best_bid_provider'] == provider:
-                lines.append(f"{instrument} {tenor} /{offer:.2f}")
+                lines.append((instrument, f"{instrument} {tenor} /{offer:.2f}"))
             elif row['best_offer_provider'] == provider:
-                lines.append(f"{instrument} {tenor} {bid:.2f}/")
+                lines.append((instrument, f"{instrument} {tenor} {bid:.2f}/"))
             else:
-                lines.append(f"{instrument} {tenor} {bid:.2f}/{offer:.2f}")
-        col.write(f"**{provider}**  \n" + "  \n".join(lines))
+                lines.append((instrument, f"{instrument} {tenor} {bid:.2f}/{offer:.2f}"))
+        col.write(f"**{provider}**  \n" + join_by_instrument(lines))
 
     market_lines = [
-        f"{row['instrument']} {row['tenor']} {row['best_bid']:.2f} / {row['best_offer']:.2f}"
+        (row['instrument'], f"{row['instrument']} {row['tenor']} {row['best_bid']:.2f} / {row['best_offer']:.2f}")
         for _, row in narrow_rows.iterrows()
     ]
-    cols[-1].write("**MARKET**  \n" + "  \n".join(market_lines))
+    cols[-1].write("**MARKET**  \n" + join_by_instrument(market_lines))
 
 
 
