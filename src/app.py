@@ -283,7 +283,7 @@ def DISPLAY_RUNS(runs: list[QuotesRun], mode:str='normal') -> None:
             styled_run_df, run_column_config = _style_run_frame(run_df)
         with cols[i]:
             if mode == 'normal':            
-                time = datetime.strptime(run.created_at, "%Y-%m-%d %H:%M:%S.%f").strftime("%d.%m.%Y %H.%M")
+                time = datetime.strptime(run.created_at, "%Y-%m-%d %H:%M:%S.%f").strftime("%d.%m.%Y %H:%M")
                 st.markdown(f'''
                 **PROVIDER**: {run.provider}  
                 **INSTRUMENT**: {run.instrument}  
@@ -419,7 +419,11 @@ if not runs:                                                            # warnin
     st.info("There are no actual runs at the moment.  \n" \
     "Please use <PARSE NEW RUN> button above to add new run(s).")
     st.stop()
-DISPLAY_RUNS(runs, 'normal')                                            # display runs
+rates_runs = [run for run in runs if run.instrument in ('OIS', 'KRS')]  # 1st row: OIS/KRS
+fx_runs = [run for run in runs if run.instrument not in ('OIS', 'KRS')] # 2nd row: XCCY, FX swap, ...
+for row_runs in (rates_runs, fx_runs):                                  # display runs
+    if row_runs:
+        DISPLAY_RUNS(row_runs, 'normal')
 
 
 
