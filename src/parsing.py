@@ -54,6 +54,7 @@ def run_to_frame(run: QuotesRun, with_changes: bool = False) -> pd.DataFrame:
     matching ``*_provider`` keys (used for joint runs built across several
     providers, see :func:`create_joint_runs`); when absent, the worst levels and
     their providers default to the best bid/offer and this run's provider.
+    Likewise ``best_bid_size``/``best_offer_size`` default to this run's size.
 
     When ``with_changes`` is True, the frame gains ``best_bid_change_bp`` and
     ``best_offer_change_bp`` columns holding the per-tenor delta, in basis
@@ -89,6 +90,8 @@ def run_to_frame(run: QuotesRun, with_changes: bool = False) -> pd.DataFrame:
             "mid": mid,
             "best_offer": best_offer,
             "best_offer_provider": quote.get("best_offer_provider", provider),
+            "best_bid_size": quote.get("best_bid_size", run.size),
+            "best_offer_size": quote.get("best_offer_size", run.size),
             "worst_offer": worst_offer,
             "worst_offer_provider": quote.get("worst_offer_provider", provider),
             "best_bid_offer_spread": spread_bp,
@@ -428,24 +431,26 @@ def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
             provider="joint",
         )
 
-        tenor_entries: dict[str, list[tuple[str | None, float, float, str | None]]] = {}
+        tenor_entries: dict[str, list[tuple[str | None, float, float, str | None, str | None]]] = {}
         for run in runs:
             for tenor, quote in run.quotes.items():
                 tenor_entries.setdefault(tenor, []).append(
-                    (run.provider, float(quote["best_bid"]), float(quote["best_offer"]), quote.get("end_date"))
+                    (run.provider, float(quote["best_bid"]), float(quote["best_offer"]), quote.get("end_date"), run.size)
                 )
 
         for tenor, entries in tenor_entries.items():
-            best_bid_provider, best_bid, _, _ = max(entries, key=lambda entry: entry[1])
-            worst_bid_provider, worst_bid, _, _ = min(entries, key=lambda entry: entry[1])
-            best_offer_provider, _, best_offer, _ = min(entries, key=lambda entry: entry[2])
-            worst_offer_provider, _, worst_offer, _ = max(entries, key=lambda entry: entry[2])
+            best_bid_provider, best_bid, _, _, best_bid_size = max(entries, key=lambda entry: entry[1])
+            worst_bid_provider, worst_bid, _, _, _ = min(entries, key=lambda entry: entry[1])
+            best_offer_provider, _, best_offer, _, best_offer_size = min(entries, key=lambda entry: entry[2])
+            worst_offer_provider, _, worst_offer, _, _ = max(entries, key=lambda entry: entry[2])
             end_dates = [entry[3] for entry in entries if entry[3] is not None]
 
             quote_payload = {
                 "best_bid": best_bid,
                 "best_offer": best_offer,
                 "best_bid_provider": best_bid_provider,
+                "best_bid_size": best_bid_size,
+                "best_offer_size": best_offer_size,
                 "worst_bid": worst_bid,
                 "worst_bid_provider": worst_bid_provider,
                 "best_offer_provider": best_offer_provider,

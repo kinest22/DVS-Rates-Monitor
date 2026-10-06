@@ -221,11 +221,13 @@ def merge_direct_quotes(joint_runs: list[QuotesRun], direct_quotes: dict[str, pd
                 best_bid = float(row['bid'])
                 quote['best_bid'] = best_bid
                 quote['best_bid_provider'] = str(row['bid_provider'] or '').strip() or None
+                quote['best_bid_size'] = str(row['bid_size'] or '').strip() or None
 
             if pd.notna(row['offer']) and (best_offer is None or row['offer'] < best_offer):
                 best_offer = float(row['offer'])
                 quote['best_offer'] = best_offer
                 quote['best_offer_provider'] = str(row['offer_provider'] or '').strip() or None
+                quote['best_offer_size'] = str(row['offer_size'] or '').strip() or None
 
             if best_bid is not None and best_offer is not None:
                 joint_run.quotes[tenor] = quote
@@ -351,20 +353,32 @@ def DISPLAY_TIGHT_QUOTES(joint_runs: list[QuotesRun]) -> None:
             groups.setdefault(instrument, []).append(line)
         return "\n\n".join("  \n".join(group) for group in groups.values())
 
+    def size_suffix(*sizes) -> str:
+        # " in 1k" for one size (or matching bid/offer sizes), " in 1k/2k" when
+        # they differ, "-" standing in for an unknown side
+        sizes = [str(size).strip() if pd.notna(size) and str(size).strip() else None for size in sizes]
+        if all(size is None for size in sizes):
+            return ""
+        if len(set(sizes)) == 1:
+            return f" in {sizes[0]}"
+        return " in " + "/".join(size or "-" for size in sizes)
+
     for col, provider in zip(cols, providers):
         lines = []
         for _, row in narrow_rows.iterrows():
             instrument, tenor, bid, offer = row['instrument'], row['tenor'], row['best_bid'], row['best_offer']
+            bid_size, offer_size = row['best_bid_size'], row['best_offer_size']
             if row['best_bid_provider'] == provider:
-                lines.append((instrument, f"{instrument} {tenor} /{offer:.2f}"))
+                lines.append((instrument, f"{instrument} {tenor} /{offer:.2f}{size_suffix(offer_size)}"))
             elif row['best_offer_provider'] == provider:
-                lines.append((instrument, f"{instrument} {tenor} {bid:.2f}/"))
+                lines.append((instrument, f"{instrument} {tenor} {bid:.2f}/{size_suffix(bid_size)}"))
             else:
-                lines.append((instrument, f"{instrument} {tenor} {bid:.2f}/{offer:.2f}"))
+                lines.append((instrument, f"{instrument} {tenor} {bid:.2f}/{offer:.2f}{size_suffix(bid_size, offer_size)}"))
         col.write(f"**{provider}**  \n" + join_by_instrument(lines))
 
     market_lines = [
-        (row['instrument'], f"{row['instrument']} {row['tenor']} {row['best_bid']:.2f} / {row['best_offer']:.2f}")
+        (row['instrument'], f"{row['instrument']} {row['tenor']} {row['best_bid']:.2f} / {row['best_offer']:.2f}"
+                            f"{size_suffix(row['best_bid_size'], row['best_offer_size'])}")
         for _, row in narrow_rows.iterrows()
     ]
     cols[-1].write("**MARKET**  \n" + join_by_instrument(market_lines))
