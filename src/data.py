@@ -209,6 +209,7 @@ def _get_previous_run(store: core.RunHistoryStore, run: "core.QuotesRun") -> "co
         SELECT * FROM runs
         WHERE provider IS ? AND underlying IS ? AND currency IS ? AND instrument IS ?
           AND (created_at < ? OR (created_at = ? AND id < ?))
+          AND EXISTS (SELECT 1 FROM quotes WHERE quotes.run_id = runs.id)
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
@@ -218,11 +219,15 @@ def _get_previous_run(store: core.RunHistoryStore, run: "core.QuotesRun") -> "co
 
 
 def _get_actual_runs(store: core.RunHistoryStore, as_of: datetime | None = None) -> list["core.QuotesRun"]:
-    """Return the latest run for each identity that is active as of the supplied time."""
-    query = "SELECT * FROM runs"
+    """Return the latest run for each identity that is active as of the supplied time.
+
+    Runs stored without any quotes (e.g. a run whose lines the parser couldn't
+    read) are skipped, so they never hide the identity's last usable run.
+    """
+    query = "SELECT * FROM runs WHERE EXISTS (SELECT 1 FROM quotes WHERE quotes.run_id = runs.id)"
     params: list[Any] = []
     if as_of is not None:
-        query += " WHERE created_at <= ?"
+        query += " AND created_at <= ?"
         params.append(as_of.isoformat(sep=" "))
     query += " ORDER BY created_at, id"
 

@@ -139,7 +139,7 @@ FOOTER_RE = re.compile(
 # Regular expression for quote rows
 # ----------------------------------------------------------------------------------------------
 QUOTE_RE = re.compile(
-    r"^(?P<tenor>[0-9]+[A-Za-z]+)\s+(?P<bid>\d+(?:[.,]\d+)?)\s*(?:/|\s+)"
+    r"^(?P<tenor>[0-9]+[A-Za-z]+)\s+(?P<bid>\d+(?:[.,]\d+)?)\s*(?:/\s*|\s+)"
     r"(?P<offer>\d+(?:[.,]\d+)?)\s*(?P<end_date>(?:\d{2}[./]\d{2}[./]\d{4}))?$",
     flags=re.IGNORECASE,
 )

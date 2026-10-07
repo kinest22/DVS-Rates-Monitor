@@ -247,7 +247,10 @@ def _show_parsed_runs_in_dialog(runs: list[QuotesRun], col: DeltaGenerator, cont
             f"**INSTRUMENT**: {run.instrument}  \n"
             f"**UNDERLYING**: {run.underlying}  \n"
             f"**SIZE**: {run.size_value:,.0f}{run.size_unit} {run.size_type} {run.size_currency}  \n"
+            f"**QUOTES**: {len(run.quotes)}  \n"
         )
+        if not run.quotes:
+            col.warning('No quote lines recognized -- this run will not be saved.')
         col.space()
 
 
@@ -266,6 +269,8 @@ def PARSE_RUN_DIALOG() -> None:
         _show_parsed_runs_in_dialog(parsed_runs, cols[1], cont)
         if cont.button('Confirm'):
             for run in parsed_runs:
+                if not run.quotes:
+                    continue  # nothing usable to store -- see the warning in the dialog
                 register_run(run)
                 st.session_state.setdefault('load_toasts', []).append(f"{run.instrument} run from {run.provider} loaded.")
             del st.session_state['parsed_runs']
