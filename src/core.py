@@ -272,10 +272,10 @@ class RateType(Enum):
 
 
 class Curve:
-    def __init__(self, curve_data: pd.DataFrame, curve_date: date, curve_type: RateType) -> None:
+    def __init__(self, curve_date: date, curve_data: pd.DataFrame, curve_type: RateType) -> None:
         value_date = curve_date + 1
-        self.__curve_data: pd.DataFrame = None
-        self.CurveType: RateType = None
+        self.__curve_data: pd.DataFrame = self._set_curve_terms(curve_data, value_date)
+        self.CurveType: RateType = curve_type
 
     def _set_curve_terms(self, curve_data: pd.DataFrame, value_date: date) -> None:
         end_date_finder = lambda t: self._add_period(value_date, t)
@@ -283,7 +283,7 @@ class Curve:
         curve_data['End'] = curve_data['Tenor'].apply(end_date_finder)
         curve_data['Term'] = actual_actual_isda(curve_data['Start'], curve_data['End'])
         curve_data['DF'] = 1
-        
+        return curve_data
 
     def _add_period(value_date: date, period: str) -> date:
         period = period.strip().upper()
