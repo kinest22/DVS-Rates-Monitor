@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import numpy as np
 import sqlite3
 import threading
 import pandas as pd
 
 from pathlib import Path
 from enum import Enum
-from datetime import date
+from datetime import date, timedelta
 from daycounts import actual_actual_isda
 
 
@@ -146,6 +147,12 @@ QUOTE_RE = re.compile(
 
 
 # ----------------------------------------------------------------------------------------------
+# Approximate tenor unit lengths in days, used only to order tenors by maturity
+# ----------------------------------------------------------------------------------------------
+TENOR_UNIT_DAYS = {"D": 1, "W": 7, "M": 30, "Y": 365}
+
+
+# ----------------------------------------------------------------------------------------------
 # Provider options shown in the Streamlit parser dialog
 # ----------------------------------------------------------------------------------------------
 POSSIBLE_RUN_PROVIDERS = ["SBER", "VTB", "NRB", "AKB"]
@@ -167,6 +174,23 @@ DIRECT_QUOTE_INSTRUMENTS = ['OIS', 'KRS', 'XCCY']
 # The number of blank rows in the manual "direct quotes" grids.
 # ----------------------------------------------------------------------------------------------
 DIRECT_QUOTE_ROWS = 10
+
+
+# ----------------------------------------------------------------------------------------------
+# Shared helpers
+# ----------------------------------------------------------------------------------------------
+def tenor_sort_key(tenor: str) -> tuple[int, float, str]:
+    """Return a key ordering tenors by maturity (``1W < 2W < 1M < ... < 1Y < 10Y``).
+
+    Tenors that don't match ``<number><D|W|M|Y>`` sort after all recognized
+    ones, alphabetically.
+    """
+    match = re.fullmatch(r"(\d+)([A-Za-z]+)", str(tenor).strip())
+    if match is not None:
+        unit_days = TENOR_UNIT_DAYS.get(match.group(2).upper())
+        if unit_days is not None:
+            return 0, int(match.group(1)) * unit_days, ""
+    return 1, 0.0, str(tenor)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -271,27 +295,64 @@ class RateType(Enum):
     ZERO    = 2
 
 
+class Compounding(Enum):
+    SIMPLE  = 0
+    ANNUAL  = 1
+    CONTINUOUS = 2
+
+
 class Curve:
-    def __init__(self, curve_date: date, curve_data: pd.DataFrame, curve_type: RateType) -> None:
-        value_date = curve_date + 1
-        self.__curve_data: pd.DataFrame = self._set_curve_terms(curve_data, value_date)
+    def __init__(self, curve_date:date, term_struct:pd.DataFrame, curve_type:RateType, cmpd:Compounding) -> None:
+        self._value_date = curve_date + timedelta(days=1)        
+        self._set_curve_terms(term_struct, self._value_date)
+        self._calc_df(term_struct, cmpd)
+        self._curve: pd.DataFrame = term_struct
         self.CurveType: RateType = curve_type
+        self.Compounding: Compounding = cmpd
 
-    def _set_curve_terms(self, curve_data: pd.DataFrame, value_date: date) -> None:
-        end_date_finder = lambda t: self._add_period(value_date, t)
-        curve_data['Start'] = value_date
-        curve_data['End'] = curve_data['Tenor'].apply(end_date_finder)
-        curve_data['Term'] = actual_actual_isda(curve_data['Start'], curve_data['End'])
-        curve_data['DF'] = 1
-        return curve_data
 
-    def _add_period(value_date: date, period: str) -> date:
+    def __str__(self) -> str:
+        n = len(self._curve)
+        head = (f"Curve(type={self.CurveType.name}, "
+                f"cmpd={self.Compounding.name}, "
+                f"value_date={self._value_date}, n={n})")
+
+        rows = []
+        for _, r in self._curve.iterrows():
+            rows.append(
+                f"  {r['Tenor']:>5}  "
+                f"T={r['Term']:8.4f}y  "
+                f"R={r['Rate']:7.4f}%  "
+                f"DF={r['DF']:.8f}"
+            )
+        return head + "\n" + "\n".join(rows)
+    
+
+    def _set_curve_terms(self, df: pd.DataFrame, value_date: date) -> None:
+        end_date_finder = lambda t: self._add_period(value_date, t).date()
+        df['Start'] = value_date
+        df['End'] = df['Tenor'].apply(end_date_finder)
+        df['Term'] = df.apply(lambda r: actual_actual_isda(r['Start'], r['End']), axis=1)
+        del df['Start']
+        del df['End']
+
+
+    def _calc_df(self, df: pd.DataFrame, cmpd: Compounding) -> pd.DataFrame:
+        match cmpd:
+            case Compounding.SIMPLE:        df['DF'] = 1 / (1 + df['Rate']/100 * df['Term'])
+            case Compounding.ANNUAL:        df['DF'] = 1 / (1 + df['Rate']/100) ** df['Term']
+            case Compounding.CONTINUOUS:    df['DF'] = np.exp(-df['Rate']/100 * df['Term'])
+            case _  :                       raise ValueError(f"Unknown compounding: '{cmpd}'")
+
+        
+    def _add_period(self, value_date: date, period: str) -> date:
         period = period.strip().upper()
         unit = period[-1]
         value = int(period[:-1])
-
         match unit:
             case 'W': return value_date + pd.DateOffset(weeks=value)
             case 'M': return value_date + pd.DateOffset(months=value)
             case 'Y': return value_date + pd.DateOffset(years=value)
             case _  : raise ValueError(f"Unknown period: '{period}'")
+
+    

@@ -25,23 +25,6 @@ import data
 from core import QuotesRun
 
 
-_TENOR_UNIT_DAYS = {"D": 1, "W": 7, "M": 30, "Y": 365}
-
-
-def tenor_sort_key(tenor: str) -> tuple[int, float, str]:
-    """Return a key ordering tenors by maturity (``1W < 2W < 1M < ... < 1Y < 10Y``).
-
-    Tenors that don't match ``<number><D|W|M|Y>`` sort after all recognized
-    ones, alphabetically.
-    """
-    match = re.fullmatch(r"(\d+)([A-Za-z]+)", str(tenor).strip())
-    if match is not None:
-        unit_days = _TENOR_UNIT_DAYS.get(match.group(2).upper())
-        if unit_days is not None:
-            return 0, int(match.group(1)) * unit_days, ""
-    return 1, 0.0, str(tenor)
-
-
 def run_to_frame(run: QuotesRun, with_changes: bool = False) -> pd.DataFrame:
     """Return a run's parsed quote matrix as a pandas DataFrame.
 
@@ -70,7 +53,7 @@ def run_to_frame(run: QuotesRun, with_changes: bool = False) -> pd.DataFrame:
     provider = run.provider
     is_fx_swap = run.instrument == "FXSWAP"
 
-    for tenor, quote in sorted(run.quotes.items(), key=lambda item: tenor_sort_key(item[0])):
+    for tenor, quote in sorted(run.quotes.items(), key=lambda item: core.tenor_sort_key(item[0])):
         best_bid = float(quote["best_bid"])
         best_offer = float(quote["best_offer"])
         worst_bid = float(quote.get("worst_bid", best_bid))
@@ -409,7 +392,8 @@ def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
     Each provider's latest active run (see :func:`data.get_actual_runs`) is
     bucketed by its ``(instrument, currency, underlying)`` identity, ignoring
     ``provider``. Each bucket becomes a single :class:`core.QuotesRun` combining
-    every provider quoting that identity: for each tenor, the best bid is the
+    every provider quoting that identity, stamped with the latest ``created_at``
+    among them: for each tenor, the best bid is the
     highest bid across the joined providers and the worst bid is the lowest; the
     best offer is the lowest offer and the worst offer is the highest. Provider
     labels are rewritten to whoever actually quoted the selected level, and
@@ -429,6 +413,7 @@ def create_joint_runs(actual_runs: list[QuotesRun]) -> list[QuotesRun]:
             instrument=instrument,
             underlying=underlying,
             provider="joint",
+            created_at=max((run.created_at for run in runs if run.created_at), default=None),
         )
 
         tenor_entries: dict[str, list[tuple[str | None, float, float, str | None, str | None]]] = {}
