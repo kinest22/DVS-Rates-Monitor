@@ -604,7 +604,7 @@ def parse_swap_run(run_text: str, provider: str | None = None) -> QuotesRun:
         if quote_match is None:
             continue
 
-        tenor = quote_match.group("tenor").upper()
+        tenor = core.normalize_tenor(quote_match.group("tenor"))
         bid = _normalize_decimal(quote_match.group("bid"))
         offer = _normalize_decimal(quote_match.group("offer"))
         quote_payload = {"best_bid": bid, "best_offer": offer}

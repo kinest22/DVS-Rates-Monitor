@@ -209,6 +209,21 @@ def tenor_sort_key(tenor: str) -> tuple[int, float, str]:
     return 1, 0.0, str(tenor)
 
 
+def normalize_tenor(tenor: str) -> str:
+    """Return the canonical spelling of a tenor: upper-cased, with whole years
+    written in years rather than months (``12M -> 1Y``, ``24M -> 2Y``), so the
+    same maturity quoted differently by different providers lands on one tenor.
+    Other tenors (``18M``, ``3M``, ``1W``) are only upper-cased.
+    """
+    tenor = str(tenor).strip().upper()
+    match = re.fullmatch(r"(\d+)M", tenor)
+    if match is not None:
+        months = int(match.group(1))
+        if months > 0 and months % 12 == 0:
+            return f"{months // 12}Y"
+    return tenor
+
+
 # ----------------------------------------------------------------------------------------------
 # Domain model classes
 # ----------------------------------------------------------------------------------------------

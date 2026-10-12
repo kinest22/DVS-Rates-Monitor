@@ -198,7 +198,7 @@ def merge_direct_quotes(joint_runs: list[QuotesRun], direct_quotes: dict[str, pd
 
     for instrument, quotes_df in direct_quotes.items():
         for _, row in quotes_df.iterrows():
-            tenor = str(row['tenor'] or '').strip().upper()
+            tenor = core.normalize_tenor(row['tenor'] or '')
             if not tenor:
                 continue  # blank row -- nothing entered yet
 
