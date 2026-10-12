@@ -11,7 +11,7 @@ import pandas as pd
 
 from pathlib import Path
 from enum import Enum
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from daycounts import actual_actual_isda
 
 
@@ -67,6 +67,22 @@ CREATE TABLE IF NOT EXISTS quotes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_quotes_run_id ON quotes (run_id);
+
+CREATE TABLE IF NOT EXISTS curves (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time TEXT NOT NULL,
+    instrument TEXT,
+    currency TEXT,
+    type TEXT NOT NULL,
+    cmpd TEXT NOT NULL,
+    tenor TEXT NOT NULL,
+    term REAL NOT NULL,
+    value REAL NOT NULL,
+    df REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_curves_identity
+    ON curves (instrument, currency, type, cmpd, time);
 """
 
 # ----------------------------------------------------------------------------------------------
@@ -302,8 +318,11 @@ class Compounding(Enum):
 
 
 class Curve:
-    def __init__(self, curve_date:date, term_struct:pd.DataFrame, curve_type:RateType, cmpd:Compounding) -> None:
-        self._value_date = curve_date + timedelta(days=1)        
+    def __init__(self, curve_time:datetime, instrument:str|None, currency:str|None, term_struct:pd.DataFrame, curve_type:RateType, cmpd:Compounding) -> None:
+        self.Time: datetime = curve_time
+        self.Instrument: str | None = instrument
+        self.Currency: str | None = currency
+        self._value_date = curve_time.date() + timedelta(days=1)
         self._set_curve_terms(term_struct, self._value_date)
         self._calc_df(term_struct, cmpd)
         self._curve: pd.DataFrame = term_struct
@@ -313,7 +332,10 @@ class Curve:
 
     def __str__(self) -> str:
         n = len(self._curve)
-        head = (f"Curve(type={self.CurveType.name}, "
+        head = (f"Curve(instrument={self.Instrument}, "
+                f"currency={self.Currency}, "
+                f"time={self.Time}, "
+                f"type={self.CurveType.name}, "
                 f"cmpd={self.Compounding.name}, "
                 f"value_date={self._value_date}, n={n})")
 
@@ -327,6 +349,10 @@ class Curve:
             )
         return head + "\n" + "\n".join(rows)
     
+
+    def levels(self) -> pd.DataFrame:
+        return self._curve
+
 
     def _set_curve_terms(self, df: pd.DataFrame, value_date: date) -> None:
         end_date_finder = lambda t: self._add_period(value_date, t).date()

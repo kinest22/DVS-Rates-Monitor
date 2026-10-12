@@ -13,8 +13,8 @@ def joint_run_to_curve(joint_run: QuotesRun) -> Curve:
 
     Each tenor's rate is the mid of its best bid and best offer (in percent).
     Tenors that lack either side are skipped, and the remaining points are
-    ordered from shortest to longest tenor. The curve date is the joint run's
-    ``created_at`` date.
+    ordered from shortest to longest tenor. The curve is timed at the joint
+    run's ``created_at`` and identified by its instrument and currency.
     """
     if joint_run.created_at is None:
         raise ValueError(f"Joint run {joint_run!r} has no created_at to date the curve with")
@@ -30,5 +30,5 @@ def joint_run_to_curve(joint_run: QuotesRun) -> Curve:
     term_struct = pd.DataFrame(rows)
     term_struct = term_struct.sort_values("Tenor", key=lambda s: s.map(tenor_sort_key)).reset_index(drop=True)
 
-    curve_date = datetime.fromisoformat(joint_run.created_at).date()
-    return Curve(curve_date, term_struct, RateType.PAR, Compounding.SIMPLE)
+    curve_time = datetime.fromisoformat(joint_run.created_at)
+    return Curve(curve_time, joint_run.instrument, joint_run.currency, term_struct, RateType.PAR, Compounding.SIMPLE)
