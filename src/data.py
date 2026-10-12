@@ -8,7 +8,7 @@ handling, and CRUD -- is implemented here.
 The module has two layers:
 
 - Internal primitives (``_add_run``, ``_get_history``, ``_get_previous_run``,
-  ``_get_actual_runs``, ``_clear``, ``_close``, plus connection/schema
+  ``_get_actual_runs``, ``_add_curve``, ``_clear``, ``_close``, plus connection/schema
   helpers) each take an explicit ``store`` argument, so they work against any
   :class:`core.RunHistoryStore` instance.
 - Public functions (``register_run``, ``get_run_history``, etc.) are thin
@@ -56,7 +56,7 @@ def _conn(store: core.RunHistoryStore) -> sqlite3.Connection:
 
 
 def _init_schema(store: core.RunHistoryStore) -> None:
-    """Create the ``runs``/``quotes`` tables on ``store`` if they don't exist yet,
+    """Create the ``runs``/``quotes``/``curves`` tables on ``store`` if they don't exist yet,
     and migrate any pre-existing ``runs`` table that predates a given column."""
     conn = _conn(store)
     with conn:
@@ -250,6 +250,50 @@ def _set_run_mode_override(store: core.RunHistoryStore, run_id: int, mode: str |
         conn.execute("UPDATE runs SET mode_override = ? WHERE id = ?", (mode, run_id))
 
 
+def _add_curve(store: core.RunHistoryStore, curve: "core.Curve") -> bool:
+    """Persist a curve's points on ``store``, one ``curves`` row per tenor.
+
+    A curve is identified by its instrument, currency, type, compounding and
+    time. If points for that identity are already stored and match exactly,
+    nothing is written and ``False`` is returned; if they differ (e.g. a direct
+    quote changed a level without a new run being parsed), they are replaced.
+    """
+    identity = (
+        curve.Time.isoformat(sep=" "),
+        curve.Instrument,
+        curve.Currency,
+        curve.CurveType.name,
+        curve.Compounding.name,
+    )
+    points = [
+        (str(row["Tenor"]), float(row["Term"]), float(row["Rate"]), float(row["DF"]))
+        for _, row in curve.levels().iterrows()
+    ]
+
+    conn = _conn(store)
+    identity_clause = "time = ? AND instrument IS ? AND currency IS ? AND type = ? AND cmpd = ?"
+    stored_points = [
+        tuple(row)
+        for row in conn.execute(
+            f"SELECT tenor, term, value, df FROM curves WHERE {identity_clause} ORDER BY id",
+            identity,
+        ).fetchall()
+    ]
+    if stored_points == points:
+        return False
+
+    with conn:
+        conn.execute(f"DELETE FROM curves WHERE {identity_clause}", identity)
+        conn.executemany(
+            """
+            INSERT INTO curves (time, instrument, currency, type, cmpd, tenor, term, value, df)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [identity + point for point in points],
+        )
+    return True
+
+
 def _clear(store: core.RunHistoryStore) -> None:
     """Delete all stored runs and quotes from ``store``."""
     conn = _conn(store)
@@ -281,6 +325,11 @@ def set_run_mode_override(run_id: int, mode: str | None) -> None:
     reloads. A fresh parse of the same identity starts a new row with no
     override, which is what clears it back to the date-based default."""
     _set_run_mode_override(core.RUN_HISTORY, run_id, mode)
+
+
+def register_curve(curve: "core.Curve") -> bool:
+    """Persist a curve unless an identical copy is already stored; return whether it was written."""
+    return _add_curve(core.RUN_HISTORY, curve)
 
 
 def get_run_history(
