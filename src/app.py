@@ -5,7 +5,7 @@ import streamlit as st
 import core
 from core import QuotesRun, Curve, DIRECT_QUOTE_INSTRUMENTS, DIRECT_QUOTE_ROWS
 from parsing import parse_multiple_runs, create_joint_runs, run_to_frame
-from curves import joint_run_to_curve
+from curves import joint_run_to_curve, cubic_spline
 from data import register_run, register_curve, get_actual_runs, set_run_mode_override
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
@@ -393,8 +393,9 @@ def DISPLAY_TIGHT_QUOTES(joint_runs: list[QuotesRun]) -> None:
 
 
 def DISPLAY_CURVE(curve: Curve) -> None:
-    """Plot a curve's rates against term as dots joined by a line, with one
-    x-axis tick per tenor and y-axis ticks every whole percent (100 bp)."""
+    """Plot a curve's rates against term as dots joined by a natural cubic
+    spline, with one x-axis tick per tenor and y-axis ticks every whole
+    percent (100 bp)."""
     st.markdown(f'**{curve.Instrument} {curve.Currency}** - {curve.CurveType.name}, {curve.Compounding.name}, as of {curve.Time:%d.%m.%Y %H:%M}')
     curve_df = curve.levels()
     # x-axis: one tick per curve point, labelled with its tenor instead of the term in years
@@ -402,15 +403,18 @@ def DISPLAY_CURVE(curve: Curve) -> None:
         f"abs(datum.value - {term!r}) < 1e-9 ? '{tenor}'"
         for term, tenor in zip(curve_df['Term'], curve_df['Tenor'])
     ) + " : ''"
-    # y-axis: whole-percent (100 bp) ticks spanning the curve's rates
-    rate_ticks = list(range(math.floor(curve_df['Rate'].min()), math.ceil(curve_df['Rate'].max()) + 1))
-    base = alt.Chart(curve_df).encode(
-        x=alt.X('Term:Q', title='Tenor', axis=alt.Axis(values=list(curve_df['Term']), labelExpr=tenor_label_expr)),
-        y=alt.Y(
-            'Rate:Q', title='Rate, %',
-            scale=alt.Scale(domain=[rate_ticks[0], rate_ticks[-1]], nice=False),
-            axis=alt.Axis(values=rate_ticks, format='d'),
-        ),
+    spline_df = cubic_spline(curve_df['Term'], curve_df['Rate'])
+    # y-axis: whole-percent (100 bp) ticks spanning the spline, which can bend past the quoted rates
+    rate_ticks = list(range(math.floor(spline_df['Rate'].min()), math.ceil(spline_df['Rate'].max()) + 1))
+    x = alt.X('Term:Q', title='Tenor', axis=alt.Axis(values=list(curve_df['Term']), labelExpr=tenor_label_expr))
+    y = alt.Y(
+        'Rate:Q', title='Rate, %',
+        scale=alt.Scale(domain=[rate_ticks[0], rate_ticks[-1]], nice=False),
+        axis=alt.Axis(values=rate_ticks, format='d'),
+    )
+    line = alt.Chart(spline_df).mark_line(strokeWidth=2).encode(x=x, y=y)
+    dots = alt.Chart(curve_df).mark_point(filled=True, size=70, opacity=1).encode(
+        x=x, y=y,
         tooltip=[
             alt.Tooltip('Tenor:N'),
             alt.Tooltip('Term:Q', format='.4f', title='Term, years'),
@@ -418,8 +422,7 @@ def DISPLAY_CURVE(curve: Curve) -> None:
             alt.Tooltip('DF:Q', format='.6f'),
         ],
     )
-    chart = base.mark_line(strokeWidth=2) + base.mark_point(filled=True, size=70, opacity=1)
-    st.altair_chart(chart, width='stretch')
+    st.altair_chart(line + dots, width='stretch')
 
 
 
