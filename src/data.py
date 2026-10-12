@@ -1,6 +1,6 @@
-"""Persistence layer: every function that talks to the run-history database.
+"""Persistence layer: every function that talks to the application database.
 
-The connection state itself lives in :class:`core.RunHistoryStore`, a
+The connection state itself lives in :class:`core.DataStorage`, a
 minimal class holding just a db path and per-thread connection bookkeeping.
 Everything that actually touches SQLite -- schema setup, connection
 handling, and CRUD -- is implemented here.
@@ -10,9 +10,9 @@ The module has two layers:
 - Internal primitives (``_add_run``, ``_get_history``, ``_get_previous_run``,
   ``_get_actual_runs``, ``_add_curve``, ``_clear``, ``_close``, plus connection/schema
   helpers) each take an explicit ``store`` argument, so they work against any
-  :class:`core.RunHistoryStore` instance.
+  :class:`core.DataStorage` instance.
 - Public functions (``register_run``, ``get_run_history``, etc.) are thin
-  wrappers bound to the shared :data:`core.RUN_HISTORY` singleton, used
+  wrappers bound to the shared :data:`core.DATA` singleton, used
   everywhere else in the app.
 
 Any future class that needs database access should follow the same split: a
@@ -32,7 +32,7 @@ import core
 HistoryKey = tuple[str | None, str | None, str | None, str | None]
 
 
-def _new_connection(store: core.RunHistoryStore) -> sqlite3.Connection:
+def _new_connection(store: core.DataStorage) -> sqlite3.Connection:
     """Open a fresh connection for the calling thread and register it on ``store``."""
     if store.db_path != ":memory:":
         Path(store.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +46,7 @@ def _new_connection(store: core.RunHistoryStore) -> sqlite3.Connection:
     return conn
 
 
-def _conn(store: core.RunHistoryStore) -> sqlite3.Connection:
+def _conn(store: core.DataStorage) -> sqlite3.Connection:
     """Return the calling thread's connection to ``store``, opening one if needed."""
     conn = getattr(store._local, "conn", None)
     if conn is None:
@@ -55,7 +55,7 @@ def _conn(store: core.RunHistoryStore) -> sqlite3.Connection:
     return conn
 
 
-def _init_schema(store: core.RunHistoryStore) -> None:
+def _init_schema(store: core.DataStorage) -> None:
     """Create the ``runs``/``quotes``/``curves`` tables on ``store`` if they don't exist yet,
     and migrate any pre-existing ``runs`` table that predates a given column."""
     conn = _conn(store)
@@ -66,7 +66,7 @@ def _init_schema(store: core.RunHistoryStore) -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN mode_override TEXT")
 
 
-def _row_to_run(store: core.RunHistoryStore, row: sqlite3.Row) -> "core.QuotesRun":
+def _row_to_run(store: core.DataStorage, row: sqlite3.Row) -> "core.QuotesRun":
     """Reconstruct a :class:`core.QuotesRun` from a ``runs`` row and its ``quotes`` rows."""
     run = core.QuotesRun(
         currency=row["currency"],
@@ -99,7 +99,7 @@ def _row_to_run(store: core.RunHistoryStore, row: sqlite3.Row) -> "core.QuotesRu
     return run
 
 
-def _add_run(store: core.RunHistoryStore, run: "core.QuotesRun", timestamp: datetime | None = None) -> datetime:
+def _add_run(store: core.DataStorage, run: "core.QuotesRun", timestamp: datetime | None = None) -> datetime:
     """Persist a run and its quotes on ``store``, returning the timestamp it was stored under."""
     stamp = timestamp or datetime.now()
     conn = _conn(store)
@@ -163,7 +163,7 @@ def _add_run(store: core.RunHistoryStore, run: "core.QuotesRun", timestamp: date
 
 
 def _get_history(
-    store: core.RunHistoryStore,
+    store: core.DataStorage,
     provider: str | None = None,
     underlying: str | None = None,
     currency: str | None = None,
@@ -195,7 +195,7 @@ def _get_history(
     return [_row_to_run(store, row) for row in rows]
 
 
-def _get_previous_run(store: core.RunHistoryStore, run: "core.QuotesRun") -> "core.QuotesRun | None":
+def _get_previous_run(store: core.DataStorage, run: "core.QuotesRun") -> "core.QuotesRun | None":
     """Return the run stored immediately before ``run`` for the same identity.
 
     "Same identity" means matching ``provider``, ``underlying``, ``currency``
@@ -218,7 +218,7 @@ def _get_previous_run(store: core.RunHistoryStore, run: "core.QuotesRun") -> "co
     return _row_to_run(store, row) if row is not None else None
 
 
-def _get_actual_runs(store: core.RunHistoryStore, as_of: datetime | None = None) -> list["core.QuotesRun"]:
+def _get_actual_runs(store: core.DataStorage, as_of: datetime | None = None) -> list["core.QuotesRun"]:
     """Return the latest run for each identity that is active as of the supplied time.
 
     Runs stored without any quotes (e.g. a run whose lines the parser couldn't
@@ -243,14 +243,14 @@ def _get_actual_runs(store: core.RunHistoryStore, as_of: datetime | None = None)
     return [_row_to_run(store, row) for row in ordered_rows]
 
 
-def _set_run_mode_override(store: core.RunHistoryStore, run_id: int, mode: str | None) -> None:
+def _set_run_mode_override(store: core.DataStorage, run_id: int, mode: str | None) -> None:
     """Persist an explicit FIRM/VIA FRESH override on a run row."""
     conn = _conn(store)
     with conn:
         conn.execute("UPDATE runs SET mode_override = ? WHERE id = ?", (mode, run_id))
 
 
-def _add_curve(store: core.RunHistoryStore, curve: "core.Curve") -> bool:
+def _add_curve(store: core.DataStorage, curve: "core.Curve") -> bool:
     """Persist a curve's points on ``store``, one ``curves`` row per tenor.
 
     A curve is identified by its instrument, currency, type, compounding and
@@ -294,7 +294,7 @@ def _add_curve(store: core.RunHistoryStore, curve: "core.Curve") -> bool:
     return True
 
 
-def _clear(store: core.RunHistoryStore) -> None:
+def _clear(store: core.DataStorage) -> None:
     """Delete all stored runs and quotes from ``store``."""
     conn = _conn(store)
     with conn:
@@ -302,7 +302,7 @@ def _clear(store: core.RunHistoryStore) -> None:
         conn.execute("DELETE FROM runs")
 
 
-def _close(store: core.RunHistoryStore) -> None:
+def _close(store: core.DataStorage) -> None:
     """Close every per-thread SQLite connection opened so far on ``store``."""
     with store._conns_lock:
         conns, store._all_conns = store._all_conns, []
@@ -312,24 +312,24 @@ def _close(store: core.RunHistoryStore) -> None:
 
 
 # The singleton itself is created in core.py; ensure its schema exists.
-_init_schema(core.RUN_HISTORY)
+_init_schema(core.DATA)
 
 
 def register_run(run: "core.QuotesRun") -> None:
     """Persist a previously parsed run in the run history."""
-    _add_run(core.RUN_HISTORY, run)
+    _add_run(core.DATA, run)
 
 
 def set_run_mode_override(run_id: int, mode: str | None) -> None:
     """Persist an explicit FIRM/VIA FRESH choice for a run, so it survives page
     reloads. A fresh parse of the same identity starts a new row with no
     override, which is what clears it back to the date-based default."""
-    _set_run_mode_override(core.RUN_HISTORY, run_id, mode)
+    _set_run_mode_override(core.DATA, run_id, mode)
 
 
 def register_curve(curve: "core.Curve") -> bool:
     """Persist a curve unless an identical copy is already stored; return whether it was written."""
-    return _add_curve(core.RUN_HISTORY, curve)
+    return _add_curve(core.DATA, curve)
 
 
 def get_run_history(
@@ -344,7 +344,7 @@ def get_run_history(
     If no filters are supplied, the full run storage is returned in append order.
     """
     return _get_history(
-        core.RUN_HISTORY,
+        core.DATA,
         provider=provider,
         underlying=underlying,
         currency=currency,
@@ -355,14 +355,14 @@ def get_run_history(
 
 def get_previous_run(run: "core.QuotesRun") -> "core.QuotesRun | None":
     """Return the run stored immediately before ``run`` for the same identity."""
-    return _get_previous_run(core.RUN_HISTORY, run)
+    return _get_previous_run(core.DATA, run)
 
 
 def get_actual_runs(as_of: datetime | None = None) -> list["core.QuotesRun"]:
     """Return the latest run for each identity that is active as of the supplied time."""
-    return _get_actual_runs(core.RUN_HISTORY, as_of=as_of)
+    return _get_actual_runs(core.DATA, as_of=as_of)
 
 
 def clear_run_storage() -> None:
     """Delete all stored runs and quotes from the SQLite-backed history."""
-    _clear(core.RUN_HISTORY)
+    _clear(core.DATA)

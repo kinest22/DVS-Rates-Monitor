@@ -33,13 +33,13 @@ flagging tenors where the market is tight and crossed between two providers.
 ```
 src/
   app.py       Streamlit UI and page entry point
-  core.py      Shared constants, the QuotesRun model, and the SQLite schema/connection state
-  data.py      Persistence layer: all SQLite reads/writes for run history
+  core.py      Shared constants, the QuotesRun and Curve models, and the SQLite schema/connection state (DataStorage)
+  data.py      Persistence layer: all SQLite reads/writes for runs and curves
   parsing.py   Run-text parsing, joint-run construction, and display-frame helpers
-  curves.py    Discounting/curve-construction utilities (work in progress)
+  curves.py    Curve construction from joint runs
   test.ipynb   Scratch notebook for exercising the parsing/history API
 data/
-  runhist.db   SQLite run history (created on first run, not committed)
+  runhist.db   SQLite database: run history and saved curves (created on first run, not committed)
 .streamlit/
   config.toml  Streamlit runtime config (logger level)
 RatesMonitor.bat  Windows launcher: activates .venv and runs the app
@@ -86,13 +86,18 @@ streamlit run src\app.py
 
 ## Data model
 
-Two SQLite tables back the run history:
+Three SQLite tables back the app:
 
 - `runs` — one row per parsed run: provider, currency, instrument,
   underlying, size metadata, `created_at` timestamp, and a `mode_override`
   column that persists an explicit FIRM/VIA FRESH choice.
 - `quotes` — one row per tenor within a run (best/worst bid and offer plus
   the provider on each side), linked to `runs` by `run_id`.
+- `curves` — one row per tenor of a saved curve: `time`, `instrument`,
+  `currency`, `type` (PAR/FWD/ZERO), `cmpd` (SIMPLE/ANNUAL/CONTINUOUS),
+  `tenor`, `term`, `value` (rate, %) and `df` (discount factor). A curve is
+  identified by `(time, instrument, currency, type, cmpd)`; saving an
+  identical curve again is skipped, and a changed one replaces the old rows.
 
 A run's **identity** is the `(provider, underlying, currency, instrument)`
 tuple. `get_actual_runs` returns the latest row per identity; parsing a new

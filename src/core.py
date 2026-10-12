@@ -16,7 +16,7 @@ from daycounts import actual_actual_isda
 
 
 # ----------------------------------------------------------------------------------------------
-# SQLite database path used by the run history store
+# SQLite database path used by the application data storage
 # ----------------------------------------------------------------------------------------------
 DEFAULT_DB_PATH = os.environ.get(
     "RATES_MONITOR_DB_PATH",
@@ -217,7 +217,7 @@ class QuotesRun:
 
     This class is intentionally a plain data holder: parsing logic lives in
     :mod:`parsing` (see :func:`parsing.parse_swap_run`), persistence lives in
-    :mod:`data` (see :class:`data.RunHistoryStore`), and presentation helpers
+    :mod:`data` (see :class:`DataStorage`), and presentation helpers
     such as :func:`parsing.run_to_frame` and :func:`parsing.format_run`
     operate on instances of this class rather than being methods on it.
 
@@ -278,8 +278,8 @@ class QuotesRun:
         )
 
 
-class RunHistoryStore:
-    """Holds the connection state for a SQLite-backed run history.
+class DataStorage:
+    """Holds the connection state for the SQLite database behind the app (runs, quotes, curves).
 
     Like :class:`QuotesRun`, this class is a plain state holder: a target
     database path plus the bookkeeping needed to hand each thread its own
@@ -287,7 +287,7 @@ class RunHistoryStore:
     thread, and sqlite3 connections are bound to the thread that created
     them). Schema setup and every read/write are implemented as functions in
     :mod:`data` that operate on instances of this class (e.g.
-    :func:`data.add_run`, :func:`data.get_history`) rather than as methods.
+    :func:`data._add_run`, :func:`data._add_curve`) rather than as methods.
     Any future class needing database access should follow the same split.
     """
 
@@ -299,10 +299,10 @@ class RunHistoryStore:
 
 
 # ----------------------------------------------------------------------------------------------
-# Shared run-history singleton. Its schema is created by data._init_schema
+# Shared data storage singleton. Its schema is created by data._init_schema
 # when data.py is first imported, since that requires a connection.
 # ----------------------------------------------------------------------------------------------
-RUN_HISTORY: RunHistoryStore = RunHistoryStore()
+DATA: DataStorage = DataStorage()
 
 
 class RateType(Enum):
