@@ -1,9 +1,12 @@
+import math
 import pandas as pd
+import altair as alt
 import streamlit as st
 import core
-from core import QuotesRun, DIRECT_QUOTE_INSTRUMENTS, DIRECT_QUOTE_ROWS
+from core import QuotesRun, Curve, DIRECT_QUOTE_INSTRUMENTS, DIRECT_QUOTE_ROWS
 from parsing import parse_multiple_runs, create_joint_runs, run_to_frame
-from data import register_run, get_actual_runs, set_run_mode_override
+from curves import joint_run_to_curve
+from data import register_run, register_curve, get_actual_runs, set_run_mode_override
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
@@ -389,6 +392,36 @@ def DISPLAY_TIGHT_QUOTES(joint_runs: list[QuotesRun]) -> None:
     cols[-1].write("**MARKET**  \n" + join_by_instrument(market_lines))
 
 
+def DISPLAY_CURVE(curve: Curve) -> None:
+    """Plot a curve's rates against term as dots joined by a line, with one
+    x-axis tick per tenor and y-axis ticks every whole percent (100 bp)."""
+    st.markdown(f'**{curve.Instrument} {curve.Currency}** - {curve.CurveType.name}, {curve.Compounding.name}, as of {curve.Time:%d.%m.%Y %H:%M}')
+    curve_df = curve.levels()
+    # x-axis: one tick per curve point, labelled with its tenor instead of the term in years
+    tenor_label_expr = ' : '.join(
+        f"abs(datum.value - {term!r}) < 1e-9 ? '{tenor}'"
+        for term, tenor in zip(curve_df['Term'], curve_df['Tenor'])
+    ) + " : ''"
+    # y-axis: whole-percent (100 bp) ticks spanning the curve's rates
+    rate_ticks = list(range(math.floor(curve_df['Rate'].min()), math.ceil(curve_df['Rate'].max()) + 1))
+    base = alt.Chart(curve_df).encode(
+        x=alt.X('Term:Q', title='Tenor', axis=alt.Axis(values=list(curve_df['Term']), labelExpr=tenor_label_expr)),
+        y=alt.Y(
+            'Rate:Q', title='Rate, %',
+            scale=alt.Scale(domain=[rate_ticks[0], rate_ticks[-1]], nice=False),
+            axis=alt.Axis(values=rate_ticks, format='d'),
+        ),
+        tooltip=[
+            alt.Tooltip('Tenor:N'),
+            alt.Tooltip('Term:Q', format='.4f', title='Term, years'),
+            alt.Tooltip('Rate:Q', format='.4f', title='Rate, %'),
+            alt.Tooltip('DF:Q', format='.6f'),
+        ],
+    )
+    chart = base.mark_line(strokeWidth=2) + base.mark_point(filled=True, size=70, opacity=1)
+    st.altair_chart(chart, width='stretch')
+
+
 
 # =====================================================================================
 # setting page
@@ -471,3 +504,25 @@ if joint_runs:
     _section_caption('Tight quotes')
     DISPLAY_TIGHT_QUOTES(joint_runs)
 
+
+
+# =====================================================================================
+# curves block
+# =====================================================================================
+curves: list[Curve] = []
+curve_errors: list[str] = []
+for run in joint_runs:
+    try:
+        curve = joint_run_to_curve(run)
+    except ValueError as exc:
+        curve_errors.append(f'{run.instrument}: {exc}')
+        continue
+    register_curve(curve)
+    curves.append(curve)
+
+if curves or curve_errors:
+    _section_caption('Curves')
+    for error in curve_errors:
+        st.warning(error)
+    for curve in curves:
+        DISPLAY_CURVE(curve)
