@@ -8,7 +8,7 @@ handling, and CRUD -- is implemented here.
 The module has two layers:
 
 - Internal primitives (``_add_run``, ``_get_history``, ``_get_previous_run``,
-  ``_get_actual_runs``, ``_add_curve``, ``_get_previous_day_curve``, ``_clear``, ``_close``, plus connection/schema
+  ``_get_actual_runs``, ``_add_curve``, ``_get_previous_day_curve``, ``_get_latest_curves``, ``_clear``, ``_close``, plus connection/schema
   helpers) each take an explicit ``store`` argument, so they work against any
   :class:`core.DataStorage` instance.
 - Public functions (``register_run``, ``get_run_history``, etc.) are thin
@@ -315,19 +315,45 @@ def _get_previous_day_curve(store: core.DataStorage, curve: "core.Curve") -> "co
     if row["time"] is None:
         return None
 
+    return _load_curve(conn, row["time"], *identity)
+
+
+def _load_curve(
+    conn: sqlite3.Connection, time: str, instrument: str, currency: str, curve_type: str, cmpd: str
+) -> "core.Curve":
+    """Rebuild a stored curve from its tenors and rates, so terms and discount
+    factors are recomputed exactly as for a fresh curve."""
     points = conn.execute(
-        f"SELECT tenor, value FROM curves WHERE {identity_clause} AND time = ? ORDER BY id",
-        identity + (row["time"],),
+        "SELECT tenor, value FROM curves "
+        "WHERE time = ? AND instrument IS ? AND currency IS ? AND type = ? AND cmpd = ? ORDER BY id",
+        (time, instrument, currency, curve_type, cmpd),
     ).fetchall()
     term_struct = pd.DataFrame([{"Tenor": point["tenor"], "Rate": point["value"]} for point in points])
     return core.Curve(
-        datetime.fromisoformat(row["time"]),
-        curve.Instrument,
-        curve.Currency,
+        datetime.fromisoformat(time),
+        instrument,
+        currency,
         term_struct,
-        curve.CurveType,
-        curve.Compounding,
+        core.RateType[curve_type],
+        core.Compounding[cmpd],
     )
+
+
+def _get_latest_curves(store: core.DataStorage) -> list["core.Curve"]:
+    """Return the most recently stored curve for every instrument, currency,
+    type and compounding, ordered by instrument and currency."""
+    conn = _conn(store)
+    rows = conn.execute(
+        """
+        SELECT MAX(time) AS time, instrument, currency, type, cmpd FROM curves
+        GROUP BY instrument, currency, type, cmpd
+        ORDER BY instrument, currency
+        """
+    ).fetchall()
+    return [
+        _load_curve(conn, row["time"], row["instrument"], row["currency"], row["type"], row["cmpd"])
+        for row in rows
+    ]
 
 
 def _clear(store: core.DataStorage) -> None:
@@ -371,6 +397,11 @@ def register_curve(curve: "core.Curve") -> bool:
 def get_previous_day_curve(curve: "core.Curve") -> "core.Curve | None":
     """Return the last stored curve from the most recent day before ``curve``'s day, if any."""
     return _get_previous_day_curve(core.DATA, curve)
+
+
+def get_latest_curves() -> list["core.Curve"]:
+    """Return the most recently stored curve for every instrument/currency/type/compounding."""
+    return _get_latest_curves(core.DATA)
 
 
 def get_run_history(

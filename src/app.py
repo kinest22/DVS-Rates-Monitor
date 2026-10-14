@@ -6,7 +6,7 @@ import core
 from core import QuotesRun, Curve, DIRECT_QUOTE_INSTRUMENTS, DIRECT_QUOTE_ROWS
 from parsing import parse_multiple_runs, create_joint_runs, run_to_frame
 from curves import joint_run_to_curve, cubic_spline
-from data import register_run, register_curve, get_previous_day_curve, get_actual_runs, set_run_mode_override
+from data import register_run, register_curve, get_previous_day_curve, get_latest_curves, get_actual_runs, set_run_mode_override
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
@@ -478,11 +478,15 @@ st.bottom.caption("© 2026 DVS Brokers · All rights reserved", text_alignment='
 
 
 # =====================================================================================
-# parse run button
+# parse run / update curves buttons
 # =====================================================================================
-if st.button("PARSE NEW RUN"):
+top_buttons = st.container(horizontal=True)
+if top_buttons.button("PARSE NEW RUN"):
     st.session_state.pop('parsed_runs', None)
     PARSE_RUN_DIALOG()
+# curves are only rebuilt and stored on demand -- handled in the curves block
+# below, once the joint runs they're built from are known
+update_curves = top_buttons.button("UPDATE CURVES")
 
 
 
@@ -502,7 +506,6 @@ runs = get_actual_runs(as_of=datetime.now())                            # fetchi
 if not runs:                                                            # warning if no runs
     st.info("There are no actual runs at the moment.  \n" \
     "Please use <PARSE NEW RUN> button above to add new run(s).")
-    st.stop()
 rates_runs = [run for run in runs if run.instrument in ('OIS', 'KRS')]  # 1st row: OIS/KRS
 fx_runs = [run for run in runs if run.instrument not in ('OIS', 'KRS')] # 2nd row: XCCY, FX swap, ...
 for row_runs in (rates_runs, fx_runs):                                  # display runs
@@ -555,17 +558,23 @@ if joint_runs:
 # =====================================================================================
 # curves block
 # =====================================================================================
-curves: list[Curve] = []
 curve_errors: list[str] = []
-for run in joint_runs:
-    try:
-        curve = joint_run_to_curve(run)
-    except ValueError as exc:
-        curve_errors.append(f'{run.instrument}: {exc}')
-        continue
-    register_curve(curve)
-    curves.append(curve)
+if update_curves:
+    if not joint_runs:
+        curve_errors.append('No joint runs to build curves from.')
+    for run in joint_runs:
+        try:
+            curve = joint_run_to_curve(run)
+        except ValueError as exc:
+            curve_errors.append(f'{run.instrument}: {exc}')
+            continue
+        register_curve(curve)
+        st.toast(f'{curve.Instrument} {curve.Currency} curve updated.', icon=":material/show_chart:")
 
+# curves are always shown from the database: the latest stored one per
+# instrument/currency, so the previous trading day's curves stay visible
+# until "UPDATE CURVES" is pressed with firm runs
+curves = get_latest_curves()
 if curves or curve_errors:
     _section_caption('Curves')
     for error in curve_errors:
