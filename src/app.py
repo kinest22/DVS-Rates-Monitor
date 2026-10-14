@@ -6,7 +6,7 @@ import core
 from core import QuotesRun, Curve, DIRECT_QUOTE_INSTRUMENTS, DIRECT_QUOTE_ROWS
 from parsing import parse_multiple_runs, create_joint_runs, run_to_frame
 from curves import joint_run_to_curve, cubic_spline
-from data import register_run, register_curve, get_actual_runs, set_run_mode_override
+from data import register_run, register_curve, get_previous_day_curve, get_actual_runs, set_run_mode_override
 from datetime import datetime
 from streamlit.delta_generator import DeltaGenerator
 from pandas.io.formats.style import Styler
@@ -392,37 +392,80 @@ def DISPLAY_TIGHT_QUOTES(joint_runs: list[QuotesRun]) -> None:
     cols[-1].write("**MARKET**  \n" + join_by_instrument(market_lines))
 
 
-def DISPLAY_CURVE(curve: Curve) -> None:
+def _curve_chart_points(curve: Curve) -> pd.DataFrame:
+    """Return the curve points to plot: below ``core.CURVE_CHART_MIN_TENOR`` only
+    ``core.CURVE_CHART_SHORT_TENORS`` are kept, so the crowded short end stays
+    readable. If that leaves nothing, every point is returned."""
+    min_tenor_key = core.tenor_sort_key(core.CURVE_CHART_MIN_TENOR)
+    levels = curve.levels()
+    points = levels[
+        levels['Tenor'].isin(core.CURVE_CHART_SHORT_TENORS)
+        | (levels['Tenor'].map(core.tenor_sort_key) >= min_tenor_key)
+    ].reset_index(drop=True)
+    return points if not points.empty else levels
+
+
+def DISPLAY_CURVE(curve: Curve, previous_curve: Curve | None = None) -> None:
     """Plot a curve's rates against term as dots joined by a natural cubic
-    spline, with one x-axis tick per tenor and y-axis ticks every whole
-    percent (100 bp)."""
-    st.markdown(f'**{curve.Instrument} {curve.Currency}** - {curve.CurveType.name}, {curve.Compounding.name}, as of {curve.Time:%d.%m.%Y %H:%M}')
-    curve_df = curve.levels()
-    # x-axis: one tick per curve point, labelled with its tenor instead of the term in years
+    spline, each dot labelled with its rate, with one x-axis tick per tenor
+    and y-axis ticks every whole percent (100 bp). If ``previous_curve`` is
+    given (e.g. the previous day's curve), it is drawn on the same axes as a
+    grey dashed line without labels, and a legend tells the two apart."""
+    title = f'**{curve.Instrument} {curve.Currency} curve**'
+    st.markdown(title)
+
+    dark = st.context.theme.type == 'dark'
+    series = [(curve, '#83C9FF' if dark else '#0068C9', [1, 0])]
+    if previous_curve is not None:
+        series.append((previous_curve, '#808495', [6, 4]))
+
+    points_frames, spline_frames = [], []
+    for series_curve, _, _ in series:
+        name = f'{series_curve.Time:%d.%m.%Y %H:%M}'
+        points = _curve_chart_points(series_curve)
+        points_frames.append(points.assign(Curve=name))
+        spline_frames.append(cubic_spline(points['Term'], points['Rate']).assign(Curve=name))
+    # rows are drawn in order, so the previous curve goes first and the current one is painted over it
+    points_df = pd.concat(points_frames[::-1], ignore_index=True)
+    spline_df = pd.concat(spline_frames[::-1], ignore_index=True)
+    current_points = points_frames[0]
+    names = [frame['Curve'].iloc[0] for frame in points_frames]
+
+    # x-axis: one tick per point of the current curve, labelled with its tenor instead of the term in years
     tenor_label_expr = ' : '.join(
         f"abs(datum.value - {term!r}) < 1e-9 ? '{tenor}'"
-        for term, tenor in zip(curve_df['Term'], curve_df['Tenor'])
+        for term, tenor in zip(current_points['Term'], current_points['Tenor'])
     ) + " : ''"
-    spline_df = cubic_spline(curve_df['Term'], curve_df['Rate'])
-    # y-axis: whole-percent (100 bp) ticks spanning the spline, which can bend past the quoted rates
+    # y-axis: whole-percent (100 bp) ticks spanning both splines, which can bend past the quoted rates
     rate_ticks = list(range(math.floor(spline_df['Rate'].min()), math.ceil(spline_df['Rate'].max()) + 1))
-    x = alt.X('Term:Q', title='Tenor', axis=alt.Axis(values=list(curve_df['Term']), labelExpr=tenor_label_expr))
+    x = alt.X('Term:Q', title='Tenor', axis=alt.Axis(values=list(current_points['Term']), labelExpr=tenor_label_expr))
     y = alt.Y(
         'Rate:Q', title='Rate, %',
         scale=alt.Scale(domain=[rate_ticks[0], rate_ticks[-1]], nice=False),
         axis=alt.Axis(values=rate_ticks, format='d'),
     )
-    line = alt.Chart(spline_df).mark_line(strokeWidth=2).encode(x=x, y=y)
-    dots = alt.Chart(curve_df).mark_point(filled=True, size=70, opacity=1).encode(
-        x=x, y=y,
+    color = alt.Color(
+        'Curve:N', sort=names,
+        scale=alt.Scale(domain=names, range=[color for _, color, _ in series]),
+        legend=alt.Legend(title=None, orient='top', symbolType='stroke', symbolStrokeWidth=2) if len(series) > 1 else None,
+    )
+    dash = alt.StrokeDash('Curve:N', sort=names, scale=alt.Scale(domain=names, range=[d for _, _, d in series]), legend=None)
+
+    line = alt.Chart(spline_df).mark_line(strokeWidth=2).encode(x=x, y=y, color=color, strokeDash=dash)
+    dots = alt.Chart(points_df).mark_point(filled=True, size=70, opacity=1).encode(
+        x=x, y=y, color=color,
         tooltip=[
+            alt.Tooltip('Curve:N'),
             alt.Tooltip('Tenor:N'),
-            alt.Tooltip('Term:Q', format='.4f', title='Term, years'),
             alt.Tooltip('Rate:Q', format='.4f', title='Rate, %'),
-            alt.Tooltip('DF:Q', format='.6f'),
         ],
     )
-    st.altair_chart(line + dots, width='stretch')
+    # Altair draws text black by default, which disappears on Streamlit's dark theme
+    label_color = '#FAFAFA' if dark else '#31333F'
+    labels = alt.Chart(current_points).mark_text(dy=-12, fontSize=11, color=label_color).encode(
+        x=x, y=y, text=alt.Text('Rate:Q', format='.2f'),
+    )
+    st.altair_chart(line + dots + labels, width='stretch')
 
 
 
@@ -528,4 +571,4 @@ if curves or curve_errors:
     for error in curve_errors:
         st.warning(error)
     for curve in curves:
-        DISPLAY_CURVE(curve)
+        DISPLAY_CURVE(curve, get_previous_day_curve(curve))

@@ -193,6 +193,14 @@ DIRECT_QUOTE_ROWS = 10
 
 
 # ----------------------------------------------------------------------------------------------
+# Tenors shown on curve charts: the short end is crowded, so below
+# CURVE_CHART_MIN_TENOR only the CURVE_CHART_SHORT_TENORS are plotted.
+# ----------------------------------------------------------------------------------------------
+CURVE_CHART_SHORT_TENORS = frozenset({"1W", "3M"})
+CURVE_CHART_MIN_TENOR = "6M"
+
+
+# ----------------------------------------------------------------------------------------------
 # Shared helpers
 # ----------------------------------------------------------------------------------------------
 def tenor_sort_key(tenor: str) -> tuple[int, float, str]:

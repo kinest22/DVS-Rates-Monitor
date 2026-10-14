@@ -8,7 +8,7 @@ handling, and CRUD -- is implemented here.
 The module has two layers:
 
 - Internal primitives (``_add_run``, ``_get_history``, ``_get_previous_run``,
-  ``_get_actual_runs``, ``_add_curve``, ``_clear``, ``_close``, plus connection/schema
+  ``_get_actual_runs``, ``_add_curve``, ``_get_previous_day_curve``, ``_clear``, ``_close``, plus connection/schema
   helpers) each take an explicit ``store`` argument, so they work against any
   :class:`core.DataStorage` instance.
 - Public functions (``register_run``, ``get_run_history``, etc.) are thin
@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 import json
 import sqlite3
+
+import pandas as pd
 
 import core
 
@@ -294,6 +296,40 @@ def _add_curve(store: core.DataStorage, curve: "core.Curve") -> bool:
     return True
 
 
+def _get_previous_day_curve(store: core.DataStorage, curve: "core.Curve") -> "core.Curve | None":
+    """Return the last curve stored on the most recent day before ``curve``'s day.
+
+    Only curves with the same instrument, currency, type and compounding are
+    considered. "Most recent day" skips days with nothing stored, so on a
+    Monday this is usually Friday's closing curve. Returns ``None`` if there is
+    no earlier curve. The curve is rebuilt from its stored tenors and rates, so
+    terms and discount factors are recomputed exactly as for a fresh curve.
+    """
+    conn = _conn(store)
+    identity = (curve.Instrument, curve.Currency, curve.CurveType.name, curve.Compounding.name)
+    identity_clause = "instrument IS ? AND currency IS ? AND type = ? AND cmpd = ?"
+    row = conn.execute(
+        f"SELECT MAX(time) AS time FROM curves WHERE {identity_clause} AND time < ?",
+        identity + (curve.Time.date().isoformat(),),
+    ).fetchone()
+    if row["time"] is None:
+        return None
+
+    points = conn.execute(
+        f"SELECT tenor, value FROM curves WHERE {identity_clause} AND time = ? ORDER BY id",
+        identity + (row["time"],),
+    ).fetchall()
+    term_struct = pd.DataFrame([{"Tenor": point["tenor"], "Rate": point["value"]} for point in points])
+    return core.Curve(
+        datetime.fromisoformat(row["time"]),
+        curve.Instrument,
+        curve.Currency,
+        term_struct,
+        curve.CurveType,
+        curve.Compounding,
+    )
+
+
 def _clear(store: core.DataStorage) -> None:
     """Delete all stored runs and quotes from ``store``."""
     conn = _conn(store)
@@ -330,6 +366,11 @@ def set_run_mode_override(run_id: int, mode: str | None) -> None:
 def register_curve(curve: "core.Curve") -> bool:
     """Persist a curve unless an identical copy is already stored; return whether it was written."""
     return _add_curve(core.DATA, curve)
+
+
+def get_previous_day_curve(curve: "core.Curve") -> "core.Curve | None":
+    """Return the last stored curve from the most recent day before ``curve``'s day, if any."""
+    return _get_previous_day_curve(core.DATA, curve)
 
 
 def get_run_history(
