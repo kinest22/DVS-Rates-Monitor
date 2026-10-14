@@ -1,3 +1,20 @@
+# =====================================================================================
+# parsing.py -- turning raw run text into QuotesRun objects
+# =====================================================================================
+# Handles everything between text pasted from a provider and structured data:
+#
+#   - splitting a pasted block into separate runs and parsing each one: header
+#     (currency, instrument, underlying), quote lines (tenor, bid, offer) and
+#     footer (size, size type, size currency)
+#   - building joint runs: the runs of all providers for the same
+#     instrument/currency/underlying merged into one run holding the best and
+#     worst bid/offer per tenor and who quoted them
+#   - presentation helpers: a run as a DataFrame (optionally with bp changes
+#     against the provider's previous run), as a dict, or as formatted text
+# =====================================================================================
+
+
+
 """Utilities for parsing swap-run text blocks into structured QuotesRun objects.
 
 The module is intentionally lightweight and works directly on raw text captured

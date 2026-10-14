@@ -1,3 +1,24 @@
+# =====================================================================================
+# core.py -- shared constants, domain model and storage state
+# =====================================================================================
+# The bottom layer of the app: every other module imports from here, and this
+# module imports none of them. It holds:
+#
+#   - configuration: database path (overridable via RATES_MONITOR_DB_PATH) and the
+#     SQLite schema for the runs / quotes / curves tables
+#   - parsing vocabulary: known currencies, instruments, indicators, header and
+#     quote-line regexes, per-instrument defaults
+#   - UI settings: run providers, tight-spread thresholds, direct-quote
+#     instruments and rows, tenors shown on curve charts
+#   - tenor helpers: sorting and normalizing tenor labels such as 1W / 3M / 12M / 1Y
+#   - domain classes: QuotesRun (a parsed run), Curve (a term structure with terms
+#     and discount factors), RateType and Compounding enums
+#   - DataStorage and its DATA singleton -- connection state only; all database
+#     reads and writes are implemented in data.py
+# =====================================================================================
+
+
+
 """Shared application constants and singleton state."""
 
 from __future__ import annotations

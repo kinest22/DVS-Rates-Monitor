@@ -1,3 +1,22 @@
+# =====================================================================================
+# data.py -- SQLite persistence for runs, quotes and curves
+# =====================================================================================
+# The only module that talks to the database. It covers:
+#
+#   - runs:   storing parsed runs, run history, the previous run of the same
+#             identity, the currently active run per provider/instrument, and the
+#             persisted FIRM / VIA FRESH override of a run
+#   - curves: storing a curve (skipped if an identical copy exists), the latest
+#             stored curve per instrument/currency, and the last curve of the
+#             previous trading day used for comparison on charts
+#
+# Each operation exists twice: a private `_name(store, ...)` primitive working on
+# any core.DataStorage, and a public wrapper bound to the core.DATA singleton that
+# the rest of the app uses. The schema is created on first import.
+# =====================================================================================
+
+
+
 """Persistence layer: every function that talks to the application database.
 
 The connection state itself lives in :class:`core.DataStorage`, a

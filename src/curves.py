@@ -1,3 +1,19 @@
+# =====================================================================================
+# curves.py -- building and interpolating rate curves
+# =====================================================================================
+# Turns joint runs into core.Curve objects and provides the maths used to draw them:
+#
+#   - joint_run_to_curve: a par, simply compounded curve from the mid of the best
+#     bid and best offer at each tenor of a joint run
+#   - cubic_spline: natural cubic spline interpolation, used by ui.DISPLAY_CURVE
+#     to draw a smooth line through the curve points
+#
+# Curves are not stored here -- app.py builds them on UPDATE CURVES and saves them
+# with data.register_curve.
+# =====================================================================================
+
+
+
 """Curve construction from parsed quote runs."""
 
 from __future__ import annotations
