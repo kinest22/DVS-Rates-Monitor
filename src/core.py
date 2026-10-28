@@ -398,6 +398,20 @@ class Curve:
         return self._curve
 
 
+    def copy(self) -> "Curve":
+        """Return a full, independent copy of the curve.
+
+        The term structure frame is deep-copied, so changes to the copy's levels
+        never affect the original. The remaining attributes (time, instrument,
+        currency, value date, enums) are immutable and are shared as they are.
+        Terms and discount factors are carried over rather than recalculated.
+        """
+        new = object.__new__(type(self))
+        new.__dict__ = self.__dict__.copy()
+        new._curve = self._curve.copy(deep=True)
+        return new
+
+
     def _set_curve_terms(self, df: pd.DataFrame, value_date: date) -> None:
         end_date_finder = lambda t: self._add_period(value_date, t).date()
         df['Start'] = value_date
