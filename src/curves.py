@@ -87,3 +87,39 @@ def cubic_spline(x: pd.Series, y: pd.Series, points: int = 200) -> pd.DataFrame:
         + (ys[i + 1] / hi - m[i + 1] * hi / 6) * left
     )
     return pd.DataFrame({x.name: grid, y.name: values})
+
+
+def bootstrap_to_zero_curve(curve: Curve) -> Curve:
+    """Bootstrap a par curve to a zero curve.
+
+    The input curve must be par and simply compounded. The output curve is
+    zero and continuously compounded, with the same tenors and time as the input.
+
+    Tenors up to 1Y keep their discount factor ``1 / (1 + r * t)``. Each longer
+    tenor is a par swap with an annual fixed leg paying on 1Y and every long-end
+    tenor before it, so its discount factor solves ``r * sum(dt_i * D_i) + D_N = 1``
+    using the discount factors already found. Zero rates are ``-ln(D) / t``.
+    """
+    if curve.CurveType != RateType.PAR or curve.Compounding != Compounding.SIMPLE:
+        raise ValueError("bootstrap_to_zero_curve only works on par, simply compounded curves")
+
+    new_curve = curve.copy()
+    ts = new_curve.levels()
+    if "1Y" not in ts["Tenor"].values:
+        raise ValueError("bootstrap_to_zero_curve needs a 1Y tenor to start the long end from")
+
+    ts["dt"] = ts["Term"].diff()
+    one_year = ts.loc[ts["Tenor"] == "1Y"].iloc[0]
+    long_end = ts["Term"] > one_year["Term"]
+
+    annuity = one_year["Term"] * one_year["DF"]
+    for idx in ts.index[long_end]:
+        rate, dt = ts.at[idx, "Rate"] / 100, ts.at[idx, "dt"]
+        ts.at[idx, "DF"] = (1.0 - rate * annuity) / (1.0 + rate * dt)
+        annuity += dt * ts.at[idx, "DF"]
+
+    ts["Rate"] = -np.log(ts["DF"]) / ts["Term"] * 100
+    del ts["dt"]
+    new_curve.CurveType = RateType.ZERO
+    new_curve.Compounding = Compounding.CONTINUOUS
+    return new_curve
